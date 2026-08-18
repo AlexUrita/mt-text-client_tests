@@ -91,7 +91,7 @@ public sealed class BouncyCastleVersionPinTests
         // actually exercised at runtime.
         Assembly? bc = TryLoad();
         bc.Should().NotBeNull();
-        string location = bc!.Location.Replace('\\', '/');
+        string location = bc!.Location;
         location.Should().NotBeNullOrWhiteSpace(
             because: "an assembly with no location is a dynamic / collectible load — not what we want here");
         (location.Contains(".nuget", StringComparison.OrdinalIgnoreCase) ||
