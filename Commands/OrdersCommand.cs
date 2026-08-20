@@ -1842,9 +1842,20 @@ public sealed class OrdersCommand : ICommand
         }
         if (cachedOrder == null)
         {
+            // update-tpsl echoes a cached *active* OrderData (NEW / PARTIALLY_FILLED).
+            // A fully-filled entry is evicted from the raw-order cache (it is a
+            // position now, not a working order), so it can never be matched here —
+            // for that case the position-level path is `orders reset-tpsl`, or
+            // attach TP/SL inline at placement (see docs/TPSL_SAFETY_GUIDE.md).
+            bool hasPosition = conn.AccountStore.GetPositionRaw(symbol,
+                hasPositionSideOverride ? positionSide : PositionSide.BOTH) != null;
+            string hint = hasPosition
+                ? "An open position exists but no working order backs it — a fully-filled entry is no longer " +
+                  "modifiable via update-tpsl. Use `orders reset-tpsl` to set TP/SL on the position, or attach " +
+                  "TP/SL inline at placement."
+                : "Run `account orders` first to populate the cache, then retry with --client-order-id <id>.";
             return CommandResult.Fail(
-                $"[{conn.Name}] No active order found for {symbol} {side} in the local cache. " +
-                "Run `account orders` first to populate it, then retry with --client-order-id <id>.");
+                $"[{conn.Name}] No active order found for {symbol} {side} in the local cache. {hint}");
         }
 
         // TakeProfitSettings / StopLossSettings.isOn = true arms the leg;
@@ -1884,8 +1895,18 @@ public sealed class OrdersCommand : ICommand
         NotificationMessageData? notification = conn.UpdateOrderTPSL(orderRequest);
         if (notification == null)
         {
-            return CommandResult.Ok(
-                $"[{conn.Name}] update-tpsl {symbol} {side} (TP={tpPercent}%, SL={slPercent}%): sent (response timed out).");
+            // No OrderTPSLUpdate acknowledgement arrived within the timeout.
+            // This is UNCONFIRMED, not a success — reporting Ok here was the
+            // root cause of "success shown but nothing happened". Note that a
+            // server-side rejection is delivered as a client-only
+            // OrderTPSLChangeFailedNotificationData, which does not derive from
+            // AbstractNotificationData and so never reaches the notification
+            // subscription this call awaits — failures are invisible on this
+            // path. Surface the uncertainty and point at how to verify.
+            return CommandResult.Fail(
+                $"[{conn.Name}] update-tpsl {symbol} {side} (TP={tpPercent}%, SL={slPercent}%): " +
+                "no acknowledgement received (request timed out). The change is UNCONFIRMED — " +
+                "verify with `orders list`, `account positions`, or `tpsl list` before relying on it.");
         }
 
         string summary =
