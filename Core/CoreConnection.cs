@@ -1464,6 +1464,11 @@ public sealed class CoreConnection : IDisposable
         MarketType marketType, string asset, bool activate = true, int timeoutMs = 10_000)
     {
         if (_udpClient == null) { return null; }
+        // The CORE keys its position book by LOWERCASE symbol (same convention as
+        // SubscribeProfiling/UnsubscribeProfiling below). Sending an upper-cased
+        // symbol ("VELVETUSDT") matches nothing and the CORE replies
+        // "There was nothing to sell", even with an open position. Normalize here.
+        asset = (asset ?? string.Empty).ToLowerInvariant();
         return SendAndAwaitNotification<PanicSellNotificationData>(
             send: () => _udpClient.SendPanicSellRequest(Profile.Exchange, marketType, asset, activate, NetworkMessagePriority.HIGH),
             build: n => new NotificationMessageData
@@ -2834,20 +2839,6 @@ public sealed class CoreConnection : IDisposable
         _udpClient.SendTransferAccountFundsRequest(Profile.Exchange, fromAccount, asset, amount, toAccount,
             (TransferFundsNotificationData result) => tcs.TrySetResult(result?.message ?? "OK"));
         return tcs.Task.GetAwaiter().GetResult();
-    }
-
-    public string PanicSell(MarketType marketType, string asset, bool isPanicSelling)
-    {
-        if (_udpClient == null)
-        {
-            return "Not connected";
-        }
-
-        var r = SendAndAwaitNotification<PanicSellNotificationData>(
-            send: () => _udpClient.SendPanicSellRequest(Profile.Exchange, marketType, asset, isPanicSelling, NetworkMessagePriority.HIGH),
-            build: n => new NotificationMessageData { msgString = n.message ?? "OK" },
-            timeoutMs: 5_000);
-        return r?.msgString ?? "Timeout";
     }
 
     public string GetKlineList(MarketType marketType, string symbol, KlineInterval interval, short limit)

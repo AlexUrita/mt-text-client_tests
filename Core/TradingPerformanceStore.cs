@@ -34,26 +34,17 @@ public sealed class TradingPerformanceStore
             return;
         }
 
-        // 0.7.25267: a snapshot replaces everything; otherwise the payload is a
-        // delta of metric changes plus a set of removed keys.
-        if (data.isSnapshot)
+        // Initial data replaces everything
+        if (data.isInitial)
         {
             _entries.Clear();
         }
 
-        if (data.deletedKeys != null)
+        if (data.tradingPerformances != null)
         {
-            foreach (TradingPerformanceKey removed in data.deletedKeys)
+            for (int i = 0; i < data.tradingPerformances.Count; i++)
             {
-                _entries.TryRemove(BuildKey(removed), out _);
-            }
-        }
-
-        if (data.metricChanges != null)
-        {
-            for (int i = 0; i < data.metricChanges.Count; i++)
-            {
-                TradingPerformanceMetricData perf = data.metricChanges[i];
+                TradingPerformanceData perf = data.tradingPerformances[i];
                 string key = BuildKey(perf.key);
                 TradingPerformanceSnapshot snapshot = CreateSnapshot(perf);
                 _entries[key] = snapshot;
@@ -83,12 +74,8 @@ public sealed class TradingPerformanceStore
         return $"{key.marketType}:{key.symbol}:{key.algorithmId}";
     }
 
-    private static TradingPerformanceSnapshot CreateSnapshot(TradingPerformanceMetricData perf)
+    private static TradingPerformanceSnapshot CreateSnapshot(TradingPerformanceData perf)
     {
-        // 0.7.25267 replaced the parallel per-timeframe lists (totals, priceDeltas,
-        // …) with a single metrics[] array (one TradingPerformanceMetrics struct per
-        // timeframe). The per-list counts now all reflect that array's length.
-        int metricCount = perf.metrics != null ? perf.metrics.Length : 0;
         return new TradingPerformanceSnapshot
         {
             MarketType = (MarketType)perf.key.marketType,
@@ -96,11 +83,11 @@ public sealed class TradingPerformanceStore
             AlgorithmId = perf.key.algorithmId,
             StartTime = perf.startTime,
             Comment = perf.comment ?? "",
-            TotalsCount = metricCount,
-            PriceDeltasCount = metricCount,
-            ProfitFactorsCount = metricCount,
-            ProfitTotalsCount = metricCount,
-            LossTotalsCount = metricCount,
+            TotalsCount = perf.totals != null ? perf.totals.Count : 0,
+            PriceDeltasCount = perf.priceDeltas != null ? perf.priceDeltas.Count : 0,
+            ProfitFactorsCount = perf.profitFactors != null ? perf.profitFactors.Count : 0,
+            ProfitTotalsCount = perf.profitTotals != null ? perf.profitTotals.Count : 0,
+            LossTotalsCount = perf.lossTotals != null ? perf.lossTotals.Count : 0,
             KeyGroup = TradingPerformanceKeyGroup.UNKNOWN,
             Timestamp = DateTime.UtcNow
         };
