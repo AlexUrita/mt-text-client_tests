@@ -213,7 +213,7 @@ public sealed class McpServer
     {
         // Redirect Console.Out -> stderr so LiteNetLib log noise
         // does not corrupt the JSON-RPC stdio channel.
-        _stdoutWriter = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false));
+        _stdoutWriter = Console.Out;
         Console.SetOut(Console.Error);
         LogStderr($"MCP Server {SERVER_VERSION} starting on stdio...");
 
@@ -1187,11 +1187,16 @@ public sealed class McpServer
                 (arguments["clear_data_archive"]?.Value<bool>() == true ? " --clear-archive" : string.Empty) +
                 profileSuffix + confirm,
 
+            // market / side are emitted as `--market <t>` / `--side <s>` FLAGS,
+            // not bare positionals: the OrdersCommand handler only reads args[0]
+            // as the symbol and then scans for these flags. Bare positionals were
+            // silently dropped, so the position side you passed never reached the
+            // wire and the handler always fell back to its FUTURES/BOTH defaults.
             // order_type is appended as `--order-type <type>` when provided.
             // The handler defaults to MARKET when the flag is absent — back-compat with
             // earlier callers that didn't pass order_type.
-            "mt_orders_close_by_tpsl" => $"orders close-by-tpsl {arguments["symbol"]?.Value<string>() ?? ""} {arguments["market"]?.Value<string>() ?? ""} {arguments["side"]?.Value<string>() ?? ""}{BuildOrderTypeArg(arguments)}{profileSuffix}{confirm}",
-            "mt_orders_reset_tpsl" => $"orders reset-tpsl {arguments["symbol"]?.Value<string>() ?? ""} {arguments["market"]?.Value<string>() ?? ""} {arguments["side"]?.Value<string>() ?? ""}{profileSuffix}{confirm}",
+            "mt_orders_close_by_tpsl" => $"orders close-by-tpsl {arguments["symbol"]?.Value<string>() ?? ""}{BuildTpslMarketSideFlags(arguments)}{BuildOrderTypeArg(arguments)}{profileSuffix}{confirm}",
+            "mt_orders_reset_tpsl" => $"orders reset-tpsl {arguments["symbol"]?.Value<string>() ?? ""}{BuildTpslMarketSideFlags(arguments)}{profileSuffix}{confirm}",
             // Active Order TP/SL/TS Update
             "mt_orders_update_tpsl" => BuildUpdateOrderTpslCommand(arguments, profileSuffix, confirm),
 
@@ -1371,6 +1376,35 @@ public sealed class McpServer
         string norm = ot.Trim().ToUpperInvariant();
         if (norm != "MARKET" && norm != "LIMIT") return "";
         return $" --order-type {norm}";
+    }
+
+    /// <summary>
+    /// Render the optional <c>market</c> / <c>side</c> MCP args as
+    /// <c>--market &lt;t&gt;</c> / <c>--side &lt;s&gt;</c> flags for
+    /// <c>orders close-by-tpsl</c> and <c>orders reset-tpsl</c>. Those handlers
+    /// parse these strictly as flags (only <c>args[0]</c> is treated as the
+    /// symbol), so emitting bare positionals dropped them on the floor and the
+    /// handler silently used its FUTURES/BOTH defaults. Unknown values are
+    /// omitted so the handler's own defaults still apply.
+    /// </summary>
+    private static string BuildTpslMarketSideFlags(JObject arguments)
+    {
+        string flags = "";
+        string? market = arguments["market"]?.Value<string>();
+        if (!string.IsNullOrWhiteSpace(market))
+        {
+            string norm = market.Trim().ToUpperInvariant();
+            if (norm == "FUTURES" || norm == "SPOT" || norm == "MARGIN" || norm == "DELIVERY")
+                flags += $" --market {norm}";
+        }
+        string? side = arguments["side"]?.Value<string>();
+        if (!string.IsNullOrWhiteSpace(side))
+        {
+            string norm = side.Trim().ToUpperInvariant();
+            if (norm == "LONG" || norm == "SHORT" || norm == "BOTH")
+                flags += $" --side {norm}";
+        }
+        return flags;
     }
 
     /// <summary>
@@ -2750,7 +2784,7 @@ public sealed class McpServer
                 ["symbol"] = algo.symbol,
                 ["market"] = algo.marketType.ToString(),
                 ["duplicate_on_destination"] = isDup,
-                ["status"] = algo.isRunning ? "RUNNING" : "STOPPED",
+                ["status"] = algo.actionType.ToString(),
             });
         }
 
@@ -3372,15 +3406,15 @@ public sealed class McpServer
                 string groupName = groupToken["name"]?.Value<string>() ?? "";
                 int groupType = groupToken["groupType"]?.Value<int>() ?? 0;
 
-                var groupRequest = new AlgorithmGroupData
+                var groupRequest = new AlgorithmData
                 {
-                    id = groupId,
+                    groupID = groupId,
                     name = groupName,
                     groupType = (AlgorithmGroupType)groupType,
+                    actionType = AlgorithmData.ActionType.SAVE_GROUP
                 };
 
-                NotificationMessageData? notification =
-                    conn.SendAlgorithmGroupRequest(groupRequest, AlgoActionType.ADD_GROUP);
+                NotificationMessageData? notification = conn.SendAlgorithmRequest(groupRequest);
                 if (notification == null)
                     results.Add($"  Group '{groupName}': sent (timed out)");
                 else if (notification.IsOk)
@@ -3476,13 +3510,13 @@ public sealed class McpServer
                 isClone = isClone,
                 isRunning = false,
                 isProcessing = false,
+                actionType = AlgorithmData.ActionType.SAVE,
                 argsJson = argsObj.ToString(Formatting.None),
                 marketType = marketType,
                 symbol = algoSymbol
             };
 
-            NotificationMessageData? notification =
-                conn.SendAlgorithmRequest(algoData, AlgoActionType.SAVE);
+            NotificationMessageData? notification = conn.SendAlgorithmRequest(algoData);
             if (notification == null)
             {
                 results.Add($"  {algoName} ({signature}): sent (timed out)");

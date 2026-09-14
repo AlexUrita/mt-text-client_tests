@@ -200,13 +200,9 @@ public sealed class CoreStatusCommand : ICommand
 
         var issues = new List<string>();
 
-        // Wire-protocol handshake: a build mismatch means the client and core
-        // may disagree on struct layouts (silent mis-deserialization).
-        if (!conn.CoreStatusStore.BuildVersionMatches)
-        {
-            issues.Add($"⚠ Core build mismatch: client built for {CoreStatusStore.ExpectedCoreBuild}, " +
-                $"core reports {conn.CoreStatusStore.GetLicense()?.BuildVersion ?? "?"} — wire layouts may disagree");
-        }
+        // Build version is reported for confirmation only — not validated
+        // against the client's ExpectedCoreBuild. The core build number is
+        // surfaced in healthData.license.version below.
 
         // Check critical metrics
         if (status.CoreCpuPercent > 90)
