@@ -1367,15 +1367,28 @@ public sealed class CoreConnection : IDisposable
         MarketType marketType, string asset, bool activate = true, int timeoutMs = 10_000)
     {
         if (_udpClient == null) { return null; }
+        // The CORE keys its position book by LOWERCASE symbol (same convention as
+        // SubscribeProfiling/UnsubscribeProfiling below). Sending an upper-cased
+        // symbol ("VELVETUSDT") matches nothing and the CORE replies
+        // "There was nothing to sell", even with an open position. Normalize here.
+        asset = NormalizePanicSellSymbol(asset);
         return SendAndAwaitNotification<PanicSellNotificationData>(
             send: () => _udpClient.SendPanicSellRequest(Profile.Exchange, marketType, asset, activate, NetworkMessagePriority.HIGH),
-            build: n => new NotificationMessageData
-            {
-                notificationCode = n.success ? NotificationCode.OK : NotificationCode.ERROR,
-                msgString = n.message ?? string.Empty,
-            },
+            build: BuildPanicSellNotification,
             timeoutMs: timeoutMs);
     }
+
+    /// <summary>Normalize symbols to the keys used by the core's panic lookup.</summary>
+    private static string NormalizePanicSellSymbol(string? asset) =>
+        (asset ?? string.Empty).ToLowerInvariant();
+
+    /// <summary>Preserve the core's acknowledgement outcome and message.</summary>
+    private static NotificationMessageData BuildPanicSellNotification(PanicSellNotificationData notification) =>
+        new NotificationMessageData
+        {
+            notificationCode = notification.success ? NotificationCode.OK : NotificationCode.ERROR,
+            msgString = notification.message ?? string.Empty,
+        };
 
     /// <summary>
     /// Panic sell a single TPSL position (the per-TPSL overload). Echoes
@@ -2737,20 +2750,6 @@ public sealed class CoreConnection : IDisposable
         _udpClient.SendTransferAccountFundsRequest(Profile.Exchange, fromAccount, asset, amount, toAccount,
             (TransferFundsNotificationData result) => tcs.TrySetResult(result?.message ?? "OK"));
         return tcs.Task.GetAwaiter().GetResult();
-    }
-
-    public string PanicSell(MarketType marketType, string asset, bool isPanicSelling)
-    {
-        if (_udpClient == null)
-        {
-            return "Not connected";
-        }
-
-        var r = SendAndAwaitNotification<PanicSellNotificationData>(
-            send: () => _udpClient.SendPanicSellRequest(Profile.Exchange, marketType, asset, isPanicSelling, NetworkMessagePriority.HIGH),
-            build: n => new NotificationMessageData { msgString = n.message ?? "OK" },
-            timeoutMs: 5_000);
-        return r?.msgString ?? "Timeout";
     }
 
     public string GetKlineList(MarketType marketType, string symbol, KlineInterval interval, short limit)

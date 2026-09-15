@@ -1,7 +1,9 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using FluentAssertions;
 using MTShared.Algorithms;
 using MTShared.Network;
+using MTShared.Network.Notifications;
 using MTShared.Structs;
 using MTShared.Types;
 using MTTextClient.Commands;
@@ -317,6 +319,166 @@ public sealed class PublicIssueRegressionUnitTests
         var request = build.Invoke(connection, new object[] { imported, AlgoActionType.ADD_GROUP });
         request.Should().BeOfType<AlgorithmFolderAddRequestData>();
         connection.AlgoStore.GetAllGroups().Single().name.Should().Be("existing");
+    }
+
+    [Theory]
+    [Trait("Category", "Unit")]
+    [InlineData("VELVETUSDT", "velvetusdt")]
+    [InlineData("VelvetUsdt", "velvetusdt")]
+    [InlineData("velvetusdt", "velvetusdt")]
+    public void Panic_sell_normalizes_the_wire_symbol(string symbol, string expected)
+    {
+        MethodInfo? normalize = typeof(CoreConnection).GetMethod(
+            "NormalizePanicSellSymbol", BindingFlags.NonPublic | BindingFlags.Static);
+        normalize.Should().NotBeNull();
+
+        string actual = (string)normalize!.Invoke(null, new object[] { symbol })!;
+
+        actual.Should().Be(expected);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public void Panic_sell_prefers_the_open_position_market_over_a_colliding_pair()
+    {
+        AccountStore account = CreatePanicSellAccount("velvetusdt", 1);
+        var exchange = new ExchangeInfoStore();
+        AddPanicSellPair(exchange, MarketType.FUTURES);
+        AddPanicSellPair(exchange, MarketType.SPOT);
+        exchange.GetTradePair("VELVETUSDT")!.MarketType.Should().Be(MarketType.SPOT);
+
+        MarketType market = ResolvePanicSellMarket(account, exchange);
+
+        market.Should().Be(MarketType.FUTURES);
+    }
+
+    [Theory]
+    [Trait("Category", "Unit")]
+    [InlineData("velvetusdt", 0)]
+    [InlineData("btcusdt", 1)]
+    public void Panic_sell_uses_the_pair_market_without_a_matching_open_position(
+        string positionSymbol, int positionAmount)
+    {
+        AccountStore account = CreatePanicSellAccount(positionSymbol, positionAmount);
+        var exchange = new ExchangeInfoStore();
+        AddPanicSellPair(exchange, MarketType.SPOT);
+
+        MarketType market = ResolvePanicSellMarket(account, exchange);
+
+        market.Should().Be(MarketType.SPOT);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public void Panic_sell_uses_futures_when_both_caches_are_empty()
+    {
+        MarketType market = ResolvePanicSellMarket(new AccountStore(), new ExchangeInfoStore());
+
+        market.Should().Be(MarketType.FUTURES);
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public void Panic_sell_returns_failure_for_a_negative_core_acknowledgement()
+    {
+        var acknowledgement = new PanicSellNotificationData
+        {
+            success = false,
+            message = "There was nothing to sell"
+        };
+
+        CommandResult result = ConvertPanicSellAcknowledgement(acknowledgement, true);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Contain("There was nothing to sell");
+        result.Data.Should().BeNull();
+    }
+
+    [Theory]
+    [Trait("Category", "Unit")]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Panic_sell_preserves_activation_in_successful_results(bool activate)
+    {
+        var acknowledgement = new PanicSellNotificationData
+        {
+            success = true,
+            message = "Request accepted"
+        };
+
+        CommandResult result = ConvertPanicSellAcknowledgement(acknowledgement, activate);
+
+        result.Success.Should().BeTrue();
+        result.Message.Should().Contain("Request accepted");
+        JObject data = JObject.FromObject(result.Data!);
+        data["Activated"]!.Value<bool>().Should().Be(activate);
+        data["Symbol"]!.Value<string>().Should().Be("VELVETUSDT");
+        data["Action"]!.Value<string>().Should().Be("PANIC_SELL");
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public void Panic_sell_keeps_timeout_uncertainty_in_the_result_message()
+    {
+        CommandResult result = ConvertPanicSellAcknowledgement(null, true);
+
+        result.Success.Should().BeTrue();
+        result.Message.Should().Contain("timed out");
+        result.Data.Should().BeNull();
+    }
+
+    private static AccountStore CreatePanicSellAccount(string symbol, int amount)
+    {
+        var positions = new PositionListData(MarketType.FUTURES);
+        positions.positions[symbol] = new ConcurrentDictionary<PositionSide, PositionData>();
+        positions.positions[symbol][PositionSide.BOTH] = new PositionData
+        {
+            symbol = symbol,
+            marketType = MarketType.FUTURES,
+            positionSide = PositionSide.BOTH,
+            positionAmount = amount
+        };
+        var account = new AccountStore();
+        account.ProcessData(NetworkMessageType.UDS_POSITIONS_RESULT, positions);
+        return account;
+    }
+
+    private static void AddPanicSellPair(ExchangeInfoStore exchange, MarketType market)
+    {
+        var pairs = new TradePairListData { marketType = market };
+        pairs.TradePairs["velvetusdt"] = new TradePairData
+        {
+            symbol = "velvetusdt",
+            marketType = market
+        };
+        exchange.ProcessData(NetworkMessageType.TRADE_PAIR_LIST_RESULT, pairs);
+    }
+
+    private static MarketType ResolvePanicSellMarket(AccountStore account, ExchangeInfoStore exchange)
+    {
+        MethodInfo? resolve = typeof(OrdersCommand).GetMethod(
+            "ResolvePanicSellMarketType", BindingFlags.NonPublic | BindingFlags.Static);
+        resolve.Should().NotBeNull();
+        return (MarketType)resolve!.Invoke(null, new object[] { account, exchange, "VELVETUSDT" })!;
+    }
+
+    private static CommandResult ConvertPanicSellAcknowledgement(
+        PanicSellNotificationData? acknowledgement, bool activate)
+    {
+        object? notification = null;
+        if (acknowledgement != null)
+        {
+            MethodInfo? convert = typeof(CoreConnection).GetMethod(
+                "BuildPanicSellNotification", BindingFlags.NonPublic | BindingFlags.Static);
+            convert.Should().NotBeNull();
+            notification = convert!.Invoke(null, new object[] { acknowledgement });
+        }
+
+        MethodInfo? build = typeof(OrdersCommand).GetMethod(
+            "BuildPanicSellResult", BindingFlags.NonPublic | BindingFlags.Static);
+        build.Should().NotBeNull();
+        return (CommandResult)build!.Invoke(null,
+            new object?[] { "test-server", "VELVETUSDT", activate, notification })!;
     }
 
 }

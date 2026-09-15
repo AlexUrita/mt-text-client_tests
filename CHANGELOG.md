@@ -9,6 +9,14 @@ Versions follow [SemVer](https://semver.org).
 
 ## Unreleased
 
+### Panic-sell request targeting and failure reporting
+
+Panic-sell requests now send lowercase symbols and prefer the market of a
+matching open position over the trade-pair cache. Without a matching position,
+the cached market is used when available, with FUTURES as the fallback.
+An explicit core rejection now returns a failed command result with the core's
+message. A request that times out remains unconfirmed.
+
 ### Pinned MoonTrader 0.7.25589 restore and protocol update
 
 A clean build now downloads the correct public MoonTrader assemblies for the
