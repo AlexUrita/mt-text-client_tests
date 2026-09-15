@@ -1371,16 +1371,24 @@ public sealed class CoreConnection : IDisposable
         // SubscribeProfiling/UnsubscribeProfiling below). Sending an upper-cased
         // symbol ("VELVETUSDT") matches nothing and the CORE replies
         // "There was nothing to sell", even with an open position. Normalize here.
-        asset = (asset ?? string.Empty).ToLowerInvariant();
+        asset = NormalizePanicSellSymbol(asset);
         return SendAndAwaitNotification<PanicSellNotificationData>(
             send: () => _udpClient.SendPanicSellRequest(Profile.Exchange, marketType, asset, activate, NetworkMessagePriority.HIGH),
-            build: n => new NotificationMessageData
-            {
-                notificationCode = n.success ? NotificationCode.OK : NotificationCode.ERROR,
-                msgString = n.message ?? string.Empty,
-            },
+            build: BuildPanicSellNotification,
             timeoutMs: timeoutMs);
     }
+
+    /// <summary>Normalize symbols to the keys used by the core's panic lookup.</summary>
+    private static string NormalizePanicSellSymbol(string? asset) =>
+        (asset ?? string.Empty).ToLowerInvariant();
+
+    /// <summary>Preserve the core's acknowledgement outcome and message.</summary>
+    private static NotificationMessageData BuildPanicSellNotification(PanicSellNotificationData notification) =>
+        new NotificationMessageData
+        {
+            notificationCode = notification.success ? NotificationCode.OK : NotificationCode.ERROR,
+            msgString = notification.message ?? string.Empty,
+        };
 
     /// <summary>
     /// Panic sell a single TPSL position (the per-TPSL overload). Echoes

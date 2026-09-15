@@ -1179,6 +1179,15 @@ public sealed class OrdersCommand : ICommand
             return CommandResult.Fail($"[{conn.Name}] ⚠⚠ PANIC SELL {symbol}?? This will MARKET CLOSE all positions!\n  Re-run with --confirm flag.");
         }
 
+        MarketType marketType = ResolvePanicSellMarketType(conn.AccountStore, conn.ExchangeInfoStore, symbol);
+        NotificationMessageData? notification = conn.PanicSell(marketType, symbol, activate);
+        return BuildPanicSellResult(conn.Name, symbol, activate, notification);
+    }
+
+    /// <summary>Prefer the open position's market when the symbol-only pair cache is ambiguous.</summary>
+    private static MarketType ResolvePanicSellMarketType(
+        AccountStore accountStore, ExchangeInfoStore exchangeInfoStore, string symbol)
+    {
         // Market type must match the actual open position. The pair cache
         // (ExchangeInfoStore) is keyed by symbol only, so a symbol listed on
         // both spot and futures (e.g. Binance VELVETUSDT) collides on one key
@@ -1188,7 +1197,7 @@ public sealed class OrdersCommand : ICommand
         // fall back to the pair cache, then FUTURES, when no position is open.
         MarketType marketType = MarketType.FUTURES;
         PositionSnapshot? openPosition = null;
-        foreach (PositionSnapshot p in conn.AccountStore.GetPositions(openOnly: true))
+        foreach (PositionSnapshot p in accountStore.GetPositions(openOnly: true))
         {
             if (p.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase))
             {
@@ -1203,24 +1212,29 @@ public sealed class OrdersCommand : ICommand
         }
         else
         {
-            TradePairSnapshot? pairInfo = conn.ExchangeInfoStore.GetTradePair(symbol);
+            TradePairSnapshot? pairInfo = exchangeInfoStore.GetTradePair(symbol);
             if (pairInfo != null)
             {
                 marketType = pairInfo.MarketType;
             }
         }
 
-        NotificationMessageData? notification = conn.PanicSell(marketType, symbol, activate);
+        return marketType;
+    }
 
+    /// <summary>Preserve explicit core failures and distinguish them from an unacknowledged send.</summary>
+    private static CommandResult BuildPanicSellResult(
+        string server, string symbol, bool activate, NotificationMessageData? notification)
+    {
         if (notification == null)
         {
-            return CommandResult.Ok($"[{conn.Name}] Panic sell {symbol}: sent (timed out).");
+            return CommandResult.Ok($"[{server}] Panic sell {symbol}: sent (timed out).");
         }
 
         return notification.IsOk
-            ? CommandResult.Ok($"[{conn.Name}] Panic sell {symbol} {(activate ? "ACTIVATED" : "DEACTIVATED")}: {notification.msgString}",
-                new { Server = conn.Name, Symbol = symbol, Activated = activate, Action = "PANIC_SELL" })
-            : CommandResult.Fail($"[{conn.Name}] Panic sell {symbol} FAILED — {notification.notificationCode}: {notification.msgString}");
+            ? CommandResult.Ok($"[{server}] Panic sell {symbol} {(activate ? "ACTIVATED" : "DEACTIVATED")}: {notification.msgString}",
+                new { Server = server, Symbol = symbol, Activated = activate, Action = "PANIC_SELL" })
+            : CommandResult.Fail($"[{server}] Panic sell {symbol} FAILED — {notification.notificationCode}: {notification.msgString}");
     }
 
     private CommandResult ChangeMargin(string[] args, string? targetProfile, bool confirmed)
