@@ -1,6 +1,5 @@
 """Vendor bootstrap regressions using local archives; no CDN or MTCore access."""
 import hashlib
-from unittest import mock
 import io
 import json
 from pathlib import Path
@@ -11,7 +10,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.dont_write_bytecode = True
@@ -78,7 +77,7 @@ class VendorFetchTests(unittest.TestCase):
     def run_fetch(self, *args, success=True):
         result = subprocess.run(
             [sys.executable, str(self.root / "scripts/fetch_vendor_libs.py"), "--rid", "osx-arm64", *args],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=30, check=False)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -148,13 +147,19 @@ class VendorFetchTests(unittest.TestCase):
             ("linux", "aarch64", "linux-arm64"), ("linux", "x86_64", "linux-x64"),
             ("win32", "AMD64", "win-x64"),
         ):
-            with self.subTest(system=system, machine=machine):
-                with mock.patch.object(fetch.sys, "platform", system), mock.patch.object(fetch.platform, "machine", return_value=machine):
-                    self.assertEqual(fetch.detect_rid(), expected)
+            with (
+                self.subTest(system=system, machine=machine),
+                mock.patch.object(fetch.sys, "platform", system),
+                mock.patch.object(fetch.platform, "machine", return_value=machine),
+            ):
+                self.assertEqual(fetch.detect_rid(), expected)
         for system, machine in (("win32", "ARM64"), ("linux", "i686"), ("freebsd", "x86_64")):
-            with mock.patch.object(fetch.sys, "platform", system), mock.patch.object(fetch.platform, "machine", return_value=machine):
-                with self.assertRaises(ValueError):
-                    fetch.detect_rid()
+            with (
+                mock.patch.object(fetch.sys, "platform", system),
+                mock.patch.object(fetch.platform, "machine", return_value=machine),
+                self.assertRaises(ValueError),
+            ):
+                fetch.detect_rid()
 
     def test_patch_is_idempotent_and_rejects_invalid_headers_without_writing(self):
         path = self.root / "patch.dll"

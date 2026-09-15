@@ -1,0 +1,5 @@
+# The vendor scripts intermix `import` and `from ... import` alphabetically
+# within each section (isort's force-sort-within-sections). Declare that so the
+# import ordering the scripts already use is the ordering the linter enforces.
+[lint.isort]
+force-sort-within-sections = true

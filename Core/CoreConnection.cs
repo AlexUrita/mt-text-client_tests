@@ -960,7 +960,7 @@ public sealed class CoreConnection : IDisposable
     {
         if (_udpClient == null) { return null; }
         return AwaitAlgoNotification(
-            () => SendAlgoRequest(new AlgorithmFolderAddRequestData { folder = folder, exchangeType = Profile.Exchange }),
+            () => SendAlgoRequest(BuildGroupRequest(folder, AlgoActionType.ADD_GROUP)),
             timeoutMs);
     }
 
@@ -969,7 +969,7 @@ public sealed class CoreConnection : IDisposable
     {
         if (_udpClient == null) { return null; }
         return AwaitAlgoNotification(
-            () => SendAlgoRequest(new AlgorithmFolderCloneRequestData { folderID = folderId, exchangeType = Profile.Exchange }),
+            () => SendAlgoRequest(BuildGroupRequest(new AlgorithmGroupData { id = folderId }, AlgoActionType.CLONE_GROUP)),
             timeoutMs);
     }
 
@@ -978,8 +978,26 @@ public sealed class CoreConnection : IDisposable
     {
         if (_udpClient == null) { return null; }
         return AwaitAlgoNotification(
-            () => SendAlgoRequest(new AlgorithmFolderRemoveRequestData { folderID = folderId, exchangeType = Profile.Exchange }),
+            () => SendAlgoRequest(BuildGroupRequest(new AlgorithmGroupData { id = folderId }, AlgoActionType.DELETE_GROUP)),
             timeoutMs);
+    }
+
+    /// <summary>Map a folder-level action to its dedicated request wire type
+    /// (AlgorithmFolder{Add,Clone,Remove}RequestData). ADD always requests a new
+    /// folder, so an imported folder whose id collides with an existing local one
+    /// is added under a core-assigned id rather than overwriting the destination.</summary>
+    private AlgorithmRequestData BuildGroupRequest(AlgorithmGroupData group, AlgoActionType action)
+    {
+        AlgorithmRequestData request = action switch
+        {
+            AlgoActionType.ADD_GROUP => new AlgorithmFolderAddRequestData { folder = group },
+            AlgoActionType.CLONE_GROUP => new AlgorithmFolderCloneRequestData { folderID = group.id },
+            AlgoActionType.DELETE_GROUP => new AlgorithmFolderRemoveRequestData { folderID = group.id },
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(action), action, "Not a folder-level action"),
+        };
+        request.exchangeType = Profile.Exchange;
+        return request;
     }
 
     /// <summary>

@@ -107,6 +107,21 @@ public sealed class AlgorithmStore
                     case AlgorithmsUpdatedEventData updated:
                         UpsertAlgorithms(updated.Algorithms);
                         break;
+                    case AlgorithmFoldersAddedEventData foldersAdded:
+                        UpsertGroups(foldersAdded.Folders);
+                        break;
+                    case AlgorithmFoldersUpdatedEventData foldersUpdated:
+                        UpsertGroups(foldersUpdated.Folders);
+                        break;
+                    case AlgorithmFoldersRemovedEventData foldersRemoved:
+                        if (foldersRemoved.Folders != null)
+                        {
+                            foreach (AlgorithmGroupData group in foldersRemoved.Folders)
+                            {
+                                _groups.TryRemove(group.id, out _);
+                            }
+                        }
+                        break;
                     case AlgorithmListData bareList:
                         ProcessAlgorithmList(bareList);
                         break;
@@ -208,6 +223,17 @@ public sealed class AlgorithmStore
         foreach (AlgorithmData algo in algorithms)
         {
             _algorithms.TryRemove(algo.id, out _);
+        }
+    }
+
+    /// <summary>Apply an incremental folder add/update delta
+    /// (AlgorithmFolders{Added,Updated}EventData) without disturbing other folders.</summary>
+    private void UpsertGroups(List<AlgorithmGroupData>? groups)
+    {
+        if (groups == null) { return; }
+        foreach (AlgorithmGroupData group in groups)
+        {
+            _groups[group.id] = group;
         }
     }
 
