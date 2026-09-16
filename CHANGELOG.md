@@ -9,6 +9,20 @@ Versions follow [SemVer](https://semver.org).
 
 ## Unreleased
 
+### Callback request completion and timeouts
+
+Callback-based alert, dust, deposit, market-data, profile-settings, and
+report-metadata requests now return when a reply arrives instead of waiting
+through a fixed delay. A missing reply produces `Timeout` instead of `Waiting...`.
+The non-alert methods in this group use a five-second reply timeout; alert
+methods retain their configurable timeout, with a two-second default.
+
+These requests now use the connection's shared rate limiter and circuit breaker.
+Repeated timeouts can temporarily block subsequent requests on that connection.
+`Timeout` can also mean that a guard prevented sending; it does not establish
+whether a request was sent or completed. Existing command result envelopes
+remain unchanged.
+
 ### Panic-sell request targeting and failure reporting
 
 Panic-sell requests now send lowercase symbols and prefer the market of a

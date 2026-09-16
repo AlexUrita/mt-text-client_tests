@@ -427,6 +427,167 @@ public sealed class PublicIssueRegressionUnitTests
         result.Data.Should().BeNull();
     }
 
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task Send_and_wait_returns_an_immediate_reply_without_waiting_for_timeout()
+    {
+        using var connection = new CoreConnection(new ServerProfile());
+        connection.Circuit.RecordFailure();
+        connection.Circuit.RecordFailure();
+        var replied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<string?> waiting = Task.Run(() => InvokeSendAndWait(connection, callback =>
+        {
+            callback("accepted");
+            replied.SetResult(true);
+        }, timeoutMs: 30_000));
+
+        try
+        {
+            await replied.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            // The reply is already available; a fixed sleep would miss this watchdog.
+            string? result = await waiting.WaitAsync(TimeSpan.FromSeconds(5));
+
+            result.Should().Be("accepted");
+            connection.Circuit.ConsecutiveFails.Should().Be(0);
+            connection.Circuit.IsClosed.Should().BeTrue();
+            connection.RateLimit.TotalAllowed.Should().Be(1);
+        }
+        finally
+        {
+            await waiting.WaitAsync(TimeSpan.FromSeconds(40));
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task Send_and_wait_completes_on_a_delayed_reply_and_ignores_duplicates()
+    {
+        using var connection = new CoreConnection(new ServerProfile());
+        var registered = new TaskCompletionSource<Action<string?>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<string?> waiting = Task.Run(() => InvokeSendAndWait(connection,
+            callback => registered.SetResult(callback), timeoutMs: 30_000));
+
+        try
+        {
+            Action<string?> callback = await registered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            waiting.IsCompleted.Should().BeFalse("no reply has arrived and the timeout has not elapsed");
+
+            callback("first reply");
+            Action duplicate = () => callback("duplicate reply");
+            duplicate.Should().NotThrow();
+            string? result = await waiting.WaitAsync(TimeSpan.FromSeconds(5));
+
+            result.Should().Be("first reply");
+            connection.RateLimit.TotalAllowed.Should().Be(1);
+            connection.Circuit.ConsecutiveFails.Should().Be(0);
+
+            // A callback retained by the sender must not affect a completed request.
+            connection.Circuit.RecordFailure();
+            duplicate.Should().NotThrow();
+            (await waiting).Should().Be("first reply");
+            connection.Circuit.ConsecutiveFails.Should().Be(1);
+        }
+        finally
+        {
+            await CompleteAndObserveWait(waiting, registered.Task);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task Send_and_wait_counts_a_timeout_once_and_ignores_late_replies()
+    {
+        using var connection = new CoreConnection(new ServerProfile());
+        connection.Circuit.RecordFailure();
+        var registered = new TaskCompletionSource<Action<string?>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<string?> waiting = Task.Run(() => InvokeSendAndWait(connection,
+            callback => registered.SetResult(callback), timeoutMs: 500));
+
+        try
+        {
+            Action<string?> callback = await registered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            string? result = await waiting.WaitAsync(TimeSpan.FromSeconds(10));
+
+            result.Should().BeNull();
+            connection.Circuit.ConsecutiveFails.Should().Be(2);
+            connection.RateLimit.TotalAllowed.Should().Be(1);
+
+            Action lateReply = () => callback("late reply");
+            lateReply.Should().NotThrow();
+            lateReply.Should().NotThrow();
+            (await waiting).Should().BeNull();
+            connection.Circuit.ConsecutiveFails.Should().Be(2);
+        }
+        finally
+        {
+            await CompleteAndObserveWait(waiting, registered.Task);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public void Send_and_wait_does_not_send_or_consume_a_token_when_the_circuit_is_open()
+    {
+        using var connection = new CoreConnection(new ServerProfile());
+        for (int i = 0; i < 5; i++)
+        {
+            connection.Circuit.RecordFailure();
+        }
+        connection.Circuit.IsOpen.Should().BeTrue();
+        bool sent = false;
+
+        string? result = InvokeSendAndWait(connection, callback =>
+        {
+            sent = true;
+            callback("unexpected reply");
+        }, timeoutMs: 30_000);
+
+        result.Should().BeNull();
+        sent.Should().BeFalse();
+        connection.RateLimit.TotalAllowed.Should().Be(0);
+        connection.Circuit.ConsecutiveFails.Should().Be(5);
+        connection.Circuit.TotalRejected.Should().Be(1);
+    }
+
+    private static string? InvokeSendAndWait(
+        CoreConnection connection, Action<Action<string?>> send, int timeoutMs)
+    {
+        MethodInfo? wait = typeof(CoreConnection).GetMethod(
+            "SendAndWait", BindingFlags.NonPublic | BindingFlags.Instance);
+        wait.Should().NotBeNull();
+        return (string?)wait!.MakeGenericMethod(typeof(string)).Invoke(connection,
+            new object[] { send, timeoutMs });
+    }
+
+    private static async Task CompleteAndObserveWait(
+        Task<string?> waiting, Task<Action<string?>> registered)
+    {
+        // Release the worker even if a broken timeout never completes its wait.
+        if (!waiting.IsCompleted && registered.IsCompletedSuccessfully)
+        {
+            try
+            {
+                (await registered)(null);
+            }
+            catch (InvalidOperationException)
+            {
+                // Completion may have won the race while the test was unwinding.
+            }
+        }
+
+        try
+        {
+            await waiting.WaitAsync(TimeSpan.FromSeconds(40));
+        }
+        catch when (waiting.IsFaulted)
+        {
+            // Observe worker failures without replacing the test's original failure.
+            _ = waiting.Exception;
+        }
+    }
+
     private static AccountStore CreatePanicSellAccount(string symbol, int amount)
     {
         var positions = new PositionListData(MarketType.FUTURES);
