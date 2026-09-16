@@ -2029,13 +2029,10 @@ public sealed class CoreConnection : IDisposable
             returnSavedAlerts = returnSaved,
             exchangeType = Profile.Exchange,
         };
-        string resultMsg = "Waiting...";
-        _udpClient.SendAlertsRequest(req, (AlertNotificationData result) =>
-        {
-            resultMsg = result?.message ?? "OK";
-        });
-        System.Threading.Thread.Sleep(waitMs);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendAlertsRequest(req,
+                (AlertNotificationData result) => cb(result?.message ?? "OK")),
+            timeoutMs: waitMs) ?? "Timeout";
     }
 
     public string SendAlertsDelete(List<long> alertIds, bool applyToAll = false, int waitMs = 2000)
@@ -2047,13 +2044,10 @@ public sealed class CoreConnection : IDisposable
             applyToAll = applyToAll,
             exchangeType = Profile.Exchange,
         };
-        string resultMsg = "Waiting...";
-        _udpClient.SendAlertsRequest(req, (AlertNotificationData result) =>
-        {
-            resultMsg = result?.message ?? "OK";
-        });
-        System.Threading.Thread.Sleep(waitMs);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendAlertsRequest(req,
+                (AlertNotificationData result) => cb(result?.message ?? "OK")),
+            timeoutMs: waitMs) ?? "Timeout";
     }
 
     public string SendAlertsSetRunning(List<long> alertIds, bool running, bool applyToAll = false, int waitMs = 2000)
@@ -2072,13 +2066,10 @@ public sealed class CoreConnection : IDisposable
                 applyToAll = applyToAll,
                 exchangeType = Profile.Exchange,
             };
-        string resultMsg = "Waiting...";
-        _udpClient.SendAlertsRequest(req, (AlertNotificationData result) =>
-        {
-            resultMsg = result?.message ?? "OK";
-        });
-        System.Threading.Thread.Sleep(waitMs);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendAlertsRequest(req,
+                (AlertNotificationData result) => cb(result?.message ?? "OK")),
+            timeoutMs: waitMs) ?? "Timeout";
     }
 
     #endregion
@@ -2507,23 +2498,22 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendDustRequest(DustRequestType.GET_INITIAL_STATE, Profile.Exchange,
-            (DustResultData result) =>
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.AppendLine($"Result: {result.resultCode}");
-                if (result.assets != null && result.assets.Length > 0)
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendDustRequest(DustRequestType.GET_INITIAL_STATE, Profile.Exchange,
+                (DustResultData result) =>
                 {
-                    sb.AppendLine($"Assets: {result.AssetsAsString}");
-                }
-                sb.AppendLine($"Convert to: {result.convertToAsset}");
-                sb.AppendLine($"Total: {result.totalAmount}");
-                sb.AppendLine($"Fee: {result.feeAmopunt}");
-                resultMsg = sb.ToString();
-            });
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendLine($"Result: {result.resultCode}");
+                    if (result.assets != null && result.assets.Length > 0)
+                    {
+                        sb.AppendLine($"Assets: {result.AssetsAsString}");
+                    }
+                    sb.AppendLine($"Convert to: {result.convertToAsset}");
+                    sb.AppendLine($"Total: {result.totalAmount}");
+                    sb.AppendLine($"Fee: {result.feeAmopunt}");
+                    cb(sb.ToString());
+                }),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     public string ConvertDust()
@@ -2533,14 +2523,11 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendDustRequest(DustRequestType.CONVERT_DUST, Profile.Exchange,
-            (DustResultData result) =>
-            {
-                resultMsg = $"Result: {result.resultCode}, Total: {result.totalAmount}, Fee: {result.feeAmopunt}";
-            });
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendDustRequest(DustRequestType.CONVERT_DUST, Profile.Exchange,
+                (DustResultData result) =>
+                    cb($"Result: {result.resultCode}, Total: {result.totalAmount}, Fee: {result.feeAmopunt}")),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     #endregion
@@ -2559,24 +2546,23 @@ public sealed class CoreConnection : IDisposable
         reqData.exchangeType = Profile.Exchange;
         reqData.coin = coin;
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendDepositRequest(reqData,
-            (DepositRequestData result) =>
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.AppendLine($"Coin: {result.coin}");
-                if (result.networks != null)
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendDepositRequest(reqData,
+                (DepositRequestData result) =>
                 {
-                    sb.AppendLine($"Networks: {result.networks.Count}");
-                }
-                if (result.depositCoins != null)
-                {
-                    sb.AppendLine($"Deposit coins: {result.depositCoins.Count}");
-                }
-                resultMsg = sb.ToString();
-            });
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendLine($"Coin: {result.coin}");
+                    if (result.networks != null)
+                    {
+                        sb.AppendLine($"Networks: {result.networks.Count}");
+                    }
+                    if (result.depositCoins != null)
+                    {
+                        sb.AppendLine($"Deposit coins: {result.depositCoins.Count}");
+                    }
+                    cb(sb.ToString());
+                }),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     public string GetDepositAddress(string coin, string network)
@@ -2592,21 +2578,20 @@ public sealed class CoreConnection : IDisposable
         reqData.coin = coin;
         reqData.network = network;
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendDepositRequest(reqData,
-            (DepositRequestData result) =>
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.AppendLine($"Coin: {result.coin}");
-                sb.AppendLine($"Network: {result.network}");
-                if (result.address != null)
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendDepositRequest(reqData,
+                (DepositRequestData result) =>
                 {
-                    sb.AppendLine($"Address: {result.address}");
-                }
-                resultMsg = sb.ToString();
-            });
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendLine($"Coin: {result.coin}");
+                    sb.AppendLine($"Network: {result.network}");
+                    if (result.address != null)
+                    {
+                        sb.AppendLine($"Address: {result.address}");
+                    }
+                    cb(sb.ToString());
+                }),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     #endregion
@@ -2759,14 +2744,10 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendGetKlineListRequest(Profile.Exchange, marketType, symbol, interval, limit,
-            (KlineListData result) =>
-            {
-                resultMsg = $"Klines received: {result?.klines?.Count ?? 0} entries";
-            }, 0);
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendGetKlineListRequest(Profile.Exchange, marketType, symbol, interval, limit,
+                (KlineListData result) => cb($"Klines received: {result?.klines?.Count ?? 0} entries"), 0),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     public string GetTicker24(MarketType marketType, string symbol)
@@ -2776,14 +2757,11 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendTickerPrice24Request(Profile.Exchange, marketType, symbol,
-            (TickerPrice24ListData result) =>
-            {
-                resultMsg = $"Ticker24: {result?.symbol} - {result?.tickerPriceList?.Count ?? 0} entries";
-            });
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendTickerPrice24Request(Profile.Exchange, marketType, symbol,
+                (TickerPrice24ListData result) =>
+                    cb($"Ticker24: {result?.symbol} - {result?.tickerPriceList?.Count ?? 0} entries")),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     public string GetTradesHistory(MarketType marketType, string symbol)
@@ -2793,15 +2771,11 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendTradesRequest(Profile.Exchange, marketType, symbol, 0, 0,
-            (TradeListData tradeData, NotificationCode code) =>
-            {
-                int count = tradeData?.trades?.Count ?? 0;
-                resultMsg = $"Trades: {count} entries, code={code}";
-            });
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendTradesRequest(Profile.Exchange, marketType, symbol, 0, 0,
+                (TradeListData tradeData, NotificationCode code) =>
+                    cb($"Trades: {tradeData?.trades?.Count ?? 0} entries, code={code}")),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     public string GetProfileSettings(string profileName)
@@ -2811,53 +2785,40 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        if (string.IsNullOrEmpty(profileName))
+        static string Format(ProfileSettingsData result)
         {
-            _udpClient.SendGetCurrentProfileSettingsRequest(
-                (ProfileSettingsData result) =>
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"Profile: {result.profileName} (success={result.isSucceeded})");
+            if (result.settings != null)
+            {
+                sb.AppendLine($"Settings count: {result.settings.Count}");
+                foreach (var kvp in result.settings)
                 {
-                    var sb = new System.Text.StringBuilder();
-                    sb.AppendLine($"Profile: {result.profileName} (success={result.isSucceeded})");
-                    if (result.settings != null)
-                    {
-                        sb.AppendLine($"Settings count: {result.settings.Count}");
-                        foreach (var kvp in result.settings)
-                        {
-                            sb.AppendLine($"  {kvp.Key} = {kvp.Value}");
-                        }
-                    }
-                    if (!string.IsNullOrEmpty(result.errorMessage))
-                    {
-                        sb.AppendLine($"Error: {result.errorMessage}");
-                    }
-                    resultMsg = sb.ToString();
-                });
+                    sb.AppendLine($"  {kvp.Key} = {kvp.Value}");
+                }
+            }
+            if (!string.IsNullOrEmpty(result.errorMessage))
+            {
+                sb.AppendLine($"Error: {result.errorMessage}");
+            }
+            return sb.ToString();
         }
-        else
-        {
-            _udpClient.SendGetProfileSettingsRequest(profileName,
-                (ProfileSettingsData result) =>
+
+        return SendAndWait<string>(
+            send: cb =>
+            {
+                if (string.IsNullOrEmpty(profileName))
                 {
-                    var sb = new System.Text.StringBuilder();
-                    sb.AppendLine($"Profile: {result.profileName} (success={result.isSucceeded})");
-                    if (result.settings != null)
-                    {
-                        sb.AppendLine($"Settings count: {result.settings.Count}");
-                        foreach (var kvp in result.settings)
-                        {
-                            sb.AppendLine($"  {kvp.Key} = {kvp.Value}");
-                        }
-                    }
-                    if (!string.IsNullOrEmpty(result.errorMessage))
-                    {
-                        sb.AppendLine($"Error: {result.errorMessage}");
-                    }
-                    resultMsg = sb.ToString();
-                });
-        }
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+                    _udpClient.SendGetCurrentProfileSettingsRequest(
+                        (ProfileSettingsData result) => cb(Format(result)));
+                }
+                else
+                {
+                    _udpClient.SendGetProfileSettingsRequest(profileName,
+                        (ProfileSettingsData result) => cb(Format(result)));
+                }
+            },
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     public string UpdateProfileSettings(string profileName, Dictionary<string, string> updated, HashSet<string> deleted)
@@ -2867,18 +2828,18 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendUpdateProfileSettingsRequest(profileName, updated, deleted,
-            (ProfileSettingsData result) =>
-            {
-                resultMsg = $"Profile: {result.profileName}, success={result.isSucceeded}, restart_needed={result.isCoreRestartNeeded}";
-                if (!string.IsNullOrEmpty(result.errorMessage))
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendUpdateProfileSettingsRequest(profileName, updated, deleted,
+                (ProfileSettingsData result) =>
                 {
-                    resultMsg += $", error={result.errorMessage}";
-                }
-            });
-        System.Threading.Thread.Sleep(2000);
-        return resultMsg;
+                    var msg = $"Profile: {result.profileName}, success={result.isSucceeded}, restart_needed={result.isCoreRestartNeeded}";
+                    if (!string.IsNullOrEmpty(result.errorMessage))
+                    {
+                        msg += $", error={result.errorMessage}";
+                    }
+                    cb(msg);
+                }),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     public string GetReportComments()
@@ -2888,21 +2849,12 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendReportCommentsRequest(
-            (ReportsFieldData result) =>
-            {
-                if (result.reportComments != null)
-                {
-                    resultMsg = $"Report comments: {result.reportComments.Count} entries";
-                }
-                else
-                {
-                    resultMsg = "No report comments";
-                }
-            });
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendReportCommentsRequest(
+                (ReportsFieldData result) => cb(result.reportComments != null
+                    ? $"Report comments: {result.reportComments.Count} entries"
+                    : "No report comments")),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     public string GetReportDates()
@@ -2912,21 +2864,12 @@ public sealed class CoreConnection : IDisposable
             return "Not connected";
         }
 
-        string resultMsg = "Waiting...";
-        _udpClient.SendReportsDateRequest(
-            (ReportsFieldData result) =>
-            {
-                if (result.reportsDate != null)
-                {
-                    resultMsg = $"Report dates: {result.reportsDate.Count} entries";
-                }
-                else
-                {
-                    resultMsg = "No report dates";
-                }
-            });
-        System.Threading.Thread.Sleep(3000);
-        return resultMsg;
+        return SendAndWait<string>(
+            send: cb => _udpClient.SendReportsDateRequest(
+                (ReportsFieldData result) => cb(result.reportsDate != null
+                    ? $"Report dates: {result.reportsDate.Count} entries"
+                    : "No report dates")),
+            timeoutMs: 5_000) ?? "Timeout";
     }
 
     #endregion
