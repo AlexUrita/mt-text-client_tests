@@ -1671,28 +1671,125 @@ public sealed class OrdersCommand : ICommand
             }
         }
 
-        // Echo the full cached PositionData. The server identifies the
-        // target by the full position state (amount, entry price, margin,
-        // liquidation price, …), not by symbol+side alone — a minimal stub
-        // is silently rejected with an empty error response.
-        PositionData? posData = conn.AccountStore.GetPositionRaw(symbol, posSide);
-        if (posData == null)
+        // close-by-tpsl closes through MTCore's TPSL bookkeeping path so the
+        // round-trip lands in the reports DB. On CORE 25810 the dedicated
+        // SendClosePositionByTPSLRequest wire method is silently ignored (no ack,
+        // no close). The canonical path — the one mt_tpsl_panic uses and that is
+        // confirmed working on 25810 — is the per-TPSL panic-sell
+        // (SendPanicSellRequest echoing the full cached TPSLInfoData). Resolve the
+        // symbol's TPSL and route through it. Prime both caches first.
+        conn.ForceRefreshTPSL();
+        conn.ForceRefreshAccount();
+
+        // Find the TPSL entry for this symbol (+ side on HEDGE accounts). The
+        // TPSL's exit-order Side is the inverse of the position side: a LONG
+        // position is closed by a SELL bracket, a SHORT by a BUY.
+        var matches = new List<TPSLPositionSnapshot>();
+        TPSLStore? tpslStore = conn.TPSLStore;
+        if (tpslStore != null)
+        {
+            foreach (TPSLPositionSnapshot t in tpslStore.GetAll())
+            {
+                if (string.Equals(t.Symbol, symbol, StringComparison.OrdinalIgnoreCase)
+                    && t.MarketType == marketType)
+                {
+                    matches.Add(t);
+                }
+            }
+        }
+        if (matches.Count == 0)
         {
             return CommandResult.Fail(
-                $"[{conn.Name}] No open position for {symbol} ({posSide}) in the local cache. " +
-                "Run `account positions` first to populate the cache, then retry.");
+                $"[{conn.Name}] No TPSL found for {symbol} ({marketType}). close-by-tpsl closes via the " +
+                "TPSL bookkeeping path, so the position must have a TPSL attached — check `tpsl list` " +
+                "(run `tpsl subscribe` first). To force a plain market close use `orders panic-sell`.");
         }
+        // Narrow by side on HEDGE accounts (LONG→SELL bracket, SHORT→BUY). One-way
+        // accounts key the position BOTH and carry a single bracket, so if the
+        // side hint matches nothing we keep the sole candidate.
+        List<TPSLPositionSnapshot> picked = matches;
+        if (posSide == PositionSide.LONG || posSide == PositionSide.SHORT)
+        {
+            OrderSideType wantExit = posSide == PositionSide.LONG ? OrderSideType.SELL : OrderSideType.BUY;
+            var narrowed = new List<TPSLPositionSnapshot>();
+            foreach (TPSLPositionSnapshot t in matches)
+            {
+                if (t.Side == wantExit) { narrowed.Add(t); }
+            }
+            if (narrowed.Count > 0) { picked = narrowed; }
+        }
+        if (picked.Count > 1)
+        {
+            var ids = new List<string>();
+            foreach (TPSLPositionSnapshot t in picked) { ids.Add(t.Id.ToString()); }
+            return CommandResult.Fail(
+                $"[{conn.Name}] {picked.Count} TPSLs match {symbol} ({marketType}): {string.Join(", ", ids)}. " +
+                "Pass --side to disambiguate, or use `tpsl panic <id>` to target one directly.");
+        }
+        long tpslId = picked[0].Id;
 
-        NotificationMessageData? result = conn.ClosePositionByTPSL(
-            conn.Profile.Exchange, posData, orderType);
+        // Capture the position side for the post-close book check (one-way keys BOTH).
+        PositionData? posData = conn.AccountStore.GetPositionRaw(symbol, posSide)
+            ?? conn.AccountStore.GetPositionRawBySymbol(symbol);
+        PositionSide verifySide = posData?.positionSide ?? posSide;
+        string verifySymbol = posData?.symbol ?? symbol;
+
+        // Panic is always MARKET; surface a note if the caller asked for LIMIT so
+        // the market execution isn't silent.
+        string orderTypeNote = orderType == OrderType.LIMIT
+            ? " (note: order_type=LIMIT requested, but the TPSL close path executes MARKET on this CORE)"
+            : "";
+
+        // Route through the canonical per-TPSL panic-sell. Short ack timeout; the
+        // position book — not the ack — is the source of truth.
+        NotificationMessageData? result = conn.PanicSellTpsl(tpslId, timeoutMs: 4_000);
+
+        bool closed = WaitForPositionGone(conn, verifySymbol, verifySide, 6_000, 750);
+        if (closed)
+        {
+            return CommandResult.Ok(
+                $"[{conn.Name}] Close-by-TPSL: {verifySymbol} {verifySide} closed via TPSL {tpslId}" +
+                (result != null && result.IsOk
+                    ? $" — {result.notificationCode}"
+                    : " (verified via position book; wire ack not received)") + orderTypeNote);
+        }
         if (result == null)
         {
-            return CommandResult.Fail("No response from close-by-tpsl.");
+            return CommandResult.Fail(
+                $"[{conn.Name}] Close-by-TPSL UNCONFIRMED: no wire ack, and {verifySymbol} {verifySide} is " +
+                $"still open after 6s (TPSL {tpslId}). Re-check with `account positions` / `tpsl list`.{orderTypeNote}");
         }
-
         return result.IsOk
-            ? CommandResult.Ok($"[{conn.Name}] Close-by-TPSL ({orderType}): {result.notificationCode}")
-            : CommandResult.Fail($"[{conn.Name}] Close-by-TPSL ({orderType}) failed: {result.notificationCode} — {result.jsonData}");
+            ? CommandResult.Ok(
+                $"[{conn.Name}] Close-by-TPSL: TPSL {tpslId} {result.notificationCode} " +
+                $"(ack OK; position still shows open — may settle shortly, re-check `account positions`){orderTypeNote}")
+            : CommandResult.Fail(
+                $"[{conn.Name}] Close-by-TPSL failed: {result.notificationCode} — {result.msgString}{orderTypeNote}");
+    }
+
+    /// <summary>
+    /// Poll the position book until the target (symbol, side) position is gone
+    /// or <paramref name="timeoutMs"/> elapses. Each poll forces a fresh
+    /// AccountInfo drop, then checks both the exact (symbol, side) key and the
+    /// symbol-only fallback (one-way positions key BOTH). Returns true once the
+    /// position is no longer open. This is the version-robust success signal for
+    /// TPSL/position closes: it observes the actual book state instead of a
+    /// per-CORE-build notification that may never arrive.
+    /// </summary>
+    private static bool WaitForPositionGone(
+        CoreConnection conn, string symbol, PositionSide side, int timeoutMs, int pollMs)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            conn.ForceRefreshAccount(2_000);
+            bool stillOpen =
+                conn.AccountStore.GetPositionRaw(symbol, side) != null ||
+                conn.AccountStore.GetPositionRawBySymbol(symbol) != null;
+            if (!stillOpen) { return true; }
+            if (sw.ElapsedMilliseconds >= timeoutMs) { return false; }
+            System.Threading.Thread.Sleep(pollMs);
+        }
     }
 
     private CommandResult ResetPositionTPSL(string[] args, string? targetProfile, bool confirmed)
@@ -1729,14 +1826,20 @@ public sealed class OrdersCommand : ICommand
             }
         }
 
-        // Echo the cached PositionData with its full identity tuple; an
-        // amount/entry/margin stub is silently rejected by the server.
-        PositionData? posData = conn.AccountStore.GetPositionRaw(symbol, posSide);
+        // Prime the position cache (positions ride the AccountInfoData drop) so
+        // the first reset-tpsl after connect doesn't fail on an empty cache.
+        conn.ForceRefreshAccount();
+
+        // Echo the cached PositionData with its full identity tuple. Resolve
+        // exact (symbol, side) first, then the unique open position for the
+        // symbol (one-way positions key BOTH but display LONG/SHORT).
+        PositionData? posData = conn.AccountStore.GetPositionRaw(symbol, posSide)
+            ?? conn.AccountStore.GetPositionRawBySymbol(symbol);
         if (posData == null)
         {
             return CommandResult.Fail(
-                $"[{conn.Name}] No open position for {symbol} ({posSide}) in the local cache. " +
-                "Run `account positions` first to populate it, then retry.");
+                $"[{conn.Name}] No open position for {symbol} ({posSide}). " +
+                "If a HEDGE account has both LONG and SHORT open on this symbol, pass --side to disambiguate.");
         }
 
         TakeProfitSettings tpSettings = new TakeProfitSettings();
