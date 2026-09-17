@@ -1671,64 +1671,100 @@ public sealed class OrdersCommand : ICommand
             }
         }
 
-        // Prime the position cache — positions ride the AccountInfoData drop.
-        // Without this, the first close-by-tpsl after connect hits an empty
-        // cache and fails with "No open position" until the caller manually
-        // runs `account positions`.
+        // close-by-tpsl closes through MTCore's TPSL bookkeeping path so the
+        // round-trip lands in the reports DB. On CORE 25810 the dedicated
+        // SendClosePositionByTPSLRequest wire method is silently ignored (no ack,
+        // no close). The canonical path — the one mt_tpsl_panic uses and that is
+        // confirmed working on 25810 — is the per-TPSL panic-sell
+        // (SendPanicSellRequest echoing the full cached TPSLInfoData). Resolve the
+        // symbol's TPSL and route through it. Prime both caches first.
+        conn.ForceRefreshTPSL();
         conn.ForceRefreshAccount();
 
-        // Echo the full cached PositionData. The server identifies the target
-        // by the full position state (amount, entry price, margin, …), not by
-        // symbol+side alone — a minimal stub is silently rejected. Resolve the
-        // exact (symbol, side) first, then fall back to the unique open position
-        // for the symbol: a one-way position is keyed BOTH in the CORE book but
-        // displayed as LONG/SHORT, so a caller passing the displayed side would
-        // otherwise miss it.
-        PositionData? posData = conn.AccountStore.GetPositionRaw(symbol, posSide)
-            ?? conn.AccountStore.GetPositionRawBySymbol(symbol);
-        if (posData == null)
+        // Find the TPSL entry for this symbol (+ side on HEDGE accounts). The
+        // TPSL's exit-order Side is the inverse of the position side: a LONG
+        // position is closed by a SELL bracket, a SHORT by a BUY.
+        var matches = new List<TPSLPositionSnapshot>();
+        TPSLStore? tpslStore = conn.TPSLStore;
+        if (tpslStore != null)
+        {
+            foreach (TPSLPositionSnapshot t in tpslStore.GetAll())
+            {
+                if (string.Equals(t.Symbol, symbol, StringComparison.OrdinalIgnoreCase)
+                    && t.MarketType == marketType)
+                {
+                    matches.Add(t);
+                }
+            }
+        }
+        if (matches.Count == 0)
         {
             return CommandResult.Fail(
-                $"[{conn.Name}] No open position for {symbol} ({posSide}). " +
-                "If a HEDGE account has both LONG and SHORT open on this symbol, pass --side to disambiguate.");
+                $"[{conn.Name}] No TPSL found for {symbol} ({marketType}). close-by-tpsl closes via the " +
+                "TPSL bookkeeping path, so the position must have a TPSL attached — check `tpsl list` " +
+                "(run `tpsl subscribe` first). To force a plain market close use `orders panic-sell`.");
         }
+        // Narrow by side on HEDGE accounts (LONG→SELL bracket, SHORT→BUY). One-way
+        // accounts key the position BOTH and carry a single bracket, so if the
+        // side hint matches nothing we keep the sole candidate.
+        List<TPSLPositionSnapshot> picked = matches;
+        if (posSide == PositionSide.LONG || posSide == PositionSide.SHORT)
+        {
+            OrderSideType wantExit = posSide == PositionSide.LONG ? OrderSideType.SELL : OrderSideType.BUY;
+            var narrowed = new List<TPSLPositionSnapshot>();
+            foreach (TPSLPositionSnapshot t in matches)
+            {
+                if (t.Side == wantExit) { narrowed.Add(t); }
+            }
+            if (narrowed.Count > 0) { picked = narrowed; }
+        }
+        if (picked.Count > 1)
+        {
+            var ids = new List<string>();
+            foreach (TPSLPositionSnapshot t in picked) { ids.Add(t.Id.ToString()); }
+            return CommandResult.Fail(
+                $"[{conn.Name}] {picked.Count} TPSLs match {symbol} ({marketType}): {string.Join(", ", ids)}. " +
+                "Pass --side to disambiguate, or use `tpsl panic <id>` to target one directly.");
+        }
+        long tpslId = picked[0].Id;
 
-        // Fire the close. The wire ack (ClosePositionNotificationData on the
-        // subscription channel) is version-fragile: across CORE builds it has
-        // been renamed, re-typed, or dropped entirely, so relying on it makes
-        // this tool break on every upgrade. Use a short ack timeout and treat
-        // the notification as advisory only — the position book is the source
-        // of truth (see WaitForPositionGone below). This keeps close-by-tpsl
-        // correct on 25810 and future versions regardless of ack behaviour.
-        NotificationMessageData? result = conn.ClosePositionByTPSL(
-            conn.Profile.Exchange, posData, orderType, timeoutMs: 4_000);
+        // Capture the position side for the post-close book check (one-way keys BOTH).
+        PositionData? posData = conn.AccountStore.GetPositionRaw(symbol, posSide)
+            ?? conn.AccountStore.GetPositionRawBySymbol(symbol);
+        PositionSide verifySide = posData?.positionSide ?? posSide;
+        string verifySymbol = posData?.symbol ?? symbol;
 
-        // Trust the position book, not the ack: re-read positions and check
-        // whether the target position is gone. This converts a silent no-ack
-        // into an accurate closed / not-closed verdict.
-        bool closed = WaitForPositionGone(conn, posData.symbol ?? symbol, posData.positionSide, 6_000, 750);
+        // Panic is always MARKET; surface a note if the caller asked for LIMIT so
+        // the market execution isn't silent.
+        string orderTypeNote = orderType == OrderType.LIMIT
+            ? " (note: order_type=LIMIT requested, but the TPSL close path executes MARKET on this CORE)"
+            : "";
+
+        // Route through the canonical per-TPSL panic-sell. Short ack timeout; the
+        // position book — not the ack — is the source of truth.
+        NotificationMessageData? result = conn.PanicSellTpsl(tpslId, timeoutMs: 4_000);
+
+        bool closed = WaitForPositionGone(conn, verifySymbol, verifySide, 6_000, 750);
         if (closed)
         {
             return CommandResult.Ok(
-                $"[{conn.Name}] Close-by-TPSL ({orderType}): {posData.symbol} {posData.positionSide} closed" +
+                $"[{conn.Name}] Close-by-TPSL: {verifySymbol} {verifySide} closed via TPSL {tpslId}" +
                 (result != null && result.IsOk
                     ? $" — {result.notificationCode}"
-                    : " (verified via position book; wire ack not received)"));
+                    : " (verified via position book; wire ack not received)") + orderTypeNote);
         }
         if (result == null)
         {
             return CommandResult.Fail(
-                $"[{conn.Name}] Close-by-TPSL ({orderType}) UNCONFIRMED: no wire ack, and {posData.symbol} " +
-                $"{posData.positionSide} is still open after 6s. The CORE did not close the position via this " +
-                "path — re-check with `account positions`.");
+                $"[{conn.Name}] Close-by-TPSL UNCONFIRMED: no wire ack, and {verifySymbol} {verifySide} is " +
+                $"still open after 6s (TPSL {tpslId}). Re-check with `account positions` / `tpsl list`.{orderTypeNote}");
         }
-
         return result.IsOk
             ? CommandResult.Ok(
-                $"[{conn.Name}] Close-by-TPSL ({orderType}): {result.notificationCode} " +
-                "(ack OK; position still shows open — may settle shortly, re-check `account positions`)")
+                $"[{conn.Name}] Close-by-TPSL: TPSL {tpslId} {result.notificationCode} " +
+                $"(ack OK; position still shows open — may settle shortly, re-check `account positions`){orderTypeNote}")
             : CommandResult.Fail(
-                $"[{conn.Name}] Close-by-TPSL ({orderType}) failed: {result.notificationCode} — {result.jsonData}");
+                $"[{conn.Name}] Close-by-TPSL failed: {result.notificationCode} — {result.msgString}{orderTypeNote}");
     }
 
     /// <summary>
