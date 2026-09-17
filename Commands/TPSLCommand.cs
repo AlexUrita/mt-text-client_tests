@@ -173,13 +173,35 @@ public sealed class TPSLCommand : ICommand
             return error!;
         }
 
-        NotificationMessageData? result = conn.CancelTPSL(tpslId);
+        // Prime the cache so CancelTPSL echoes the full identity tuple (an
+        // id-only stub is silently dropped) and so the book check below can
+        // confirm the cancel.
+        conn.ForceRefreshTPSL();
+
+        // Short ack timeout: the TPSLCancelNotificationData ack is version-fragile,
+        // so the TPSL book — not the ack — is the source of truth.
+        NotificationMessageData? result = conn.CancelTPSL(tpslId, timeoutMs: 4_000);
+        bool gone = WaitForTpslGone(conn, tpslId, 6_000, 750);
+        if (gone)
+        {
+            return CommandResult.Ok(
+                $"[{conn.Name}] Cancel TPSL {tpslId}: cancelled" +
+                (result != null && result.IsOk
+                    ? $" — {result.notificationCode}"
+                    : " (verified via TPSL book; wire ack not received)"));
+        }
         if (result == null)
         {
-            return CommandResult.Fail($"[{conn.Name}] Cancel TPSL {tpslId} failed or timed out.");
+            return CommandResult.Fail(
+                $"[{conn.Name}] Cancel TPSL {tpslId} UNCONFIRMED: no wire ack, and the TPSL is still " +
+                "present after 6s. Re-check with `tpsl list`.");
         }
-
-        return CommandResult.Ok($"[{conn.Name}] Cancel TPSL {tpslId}: {result.notificationCode} — {result.msgString}");
+        return result.IsOk
+            ? CommandResult.Ok(
+                $"[{conn.Name}] Cancel TPSL {tpslId}: {result.notificationCode} — {result.msgString} " +
+                "(ack OK; still listed — may settle shortly, re-check `tpsl list`)")
+            : CommandResult.Fail(
+                $"[{conn.Name}] Cancel TPSL {tpslId} failed: {result.notificationCode} — {result.msgString}");
     }
 
     private CommandResult HandleSubscribe(string? targetProfile)
@@ -246,14 +268,29 @@ public sealed class TPSLCommand : ICommand
         TPSLInfoListData tpslData = new TPSLInfoListData();
         tpslData.infoData = ids.Select(id => new TPSLInfoData { id = id }).ToList();
 
-        NotificationMessageData? result = conn.JoinTPSL(tpslData);
+        // Prime the cache (JoinTPSL echoes the full identity tuple per id) and
+        // snapshot the book so we can confirm the merge without the ack.
+        conn.ForceRefreshTPSL();
+        string beforeSig = TpslBookSignature(conn);
+
+        NotificationMessageData? result = conn.JoinTPSL(tpslData, timeoutMs: 4_000);
+        bool changed = WaitForTpslBookChange(conn, beforeSig, 6_000, 750);
+        if (changed)
+        {
+            return CommandResult.Ok(
+                $"[{conn.Name}] TPSL join [{string.Join(", ", ids)}]: applied" +
+                (result != null && result.IsOk
+                    ? $" — {result.notificationCode}"
+                    : " (verified via TPSL book change; wire ack not received)"));
+        }
         if (result == null)
         {
-            return CommandResult.Fail("No response from TPSL join.");
+            return CommandResult.Fail(
+                $"[{conn.Name}] TPSL join UNCONFIRMED: no wire ack and the TPSL book is unchanged after 6s. " +
+                "Re-check with `tpsl list`.");
         }
-
         return result.IsOk
-            ? CommandResult.Ok($"[{conn.Name}] TPSL join: {result.notificationCode}")
+            ? CommandResult.Ok($"[{conn.Name}] TPSL join: {result.notificationCode} (ack OK; book not yet changed — re-check `tpsl list`)")
             : CommandResult.Fail($"[{conn.Name}] TPSL join failed: {result.notificationCode} — {result.jsonData}");
     }
 
@@ -283,14 +320,29 @@ public sealed class TPSLCommand : ICommand
         TPSLInfoData tpslData = new TPSLInfoData();
         tpslData.id = tpslId;
 
-        NotificationMessageData? result = conn.SplitTPSL(tpslData);
+        // Prime the cache (SplitTPSL echoes the full identity tuple) and snapshot
+        // the book so the split can be confirmed without the ack.
+        conn.ForceRefreshTPSL();
+        string beforeSig = TpslBookSignature(conn);
+
+        NotificationMessageData? result = conn.SplitTPSL(tpslData, timeoutMs: 4_000);
+        bool changed = WaitForTpslBookChange(conn, beforeSig, 6_000, 750);
+        if (changed)
+        {
+            return CommandResult.Ok(
+                $"[{conn.Name}] TPSL split {tpslId}: applied" +
+                (result != null && result.IsOk
+                    ? $" — {result.notificationCode}"
+                    : " (verified via TPSL book change; wire ack not received)"));
+        }
         if (result == null)
         {
-            return CommandResult.Fail("No response from TPSL split.");
+            return CommandResult.Fail(
+                $"[{conn.Name}] TPSL split {tpslId} UNCONFIRMED: no wire ack and the TPSL book is unchanged " +
+                "after 6s. Re-check with `tpsl list`.");
         }
-
         return result.IsOk
-            ? CommandResult.Ok($"[{conn.Name}] TPSL split: {result.notificationCode}")
+            ? CommandResult.Ok($"[{conn.Name}] TPSL split {tpslId}: {result.notificationCode} (ack OK; book not yet changed — re-check `tpsl list`)")
             : CommandResult.Fail($"[{conn.Name}] TPSL split failed: {result.notificationCode} — {result.jsonData}");
     }
 
@@ -319,25 +371,47 @@ public sealed class TPSLCommand : ICommand
         // identity tuple).
         conn.ForceRefreshTPSL();
 
-        var rows = new List<object>();
-        int ok = 0, fail = 0;
+        // Fire all cancels with a short, version-fragile-ack timeout; keep each
+        // per-id wire result for fallback reporting.
+        var sent = new List<(long id, string? parseError, NotificationMessageData? result)>();
         for (int i = 1; i < args.Count; i++)
         {
             if (!long.TryParse(args[i], out long id))
             {
-                rows.Add(new { id = args[i], success = false, message = "invalid id" });
+                sent.Add((0L, args[i], null));
+                continue;
+            }
+            sent.Add((id, null, conn.CancelTPSL(id, timeoutMs: 4_000)));
+        }
+
+        // One post-loop book read is the source of truth: any id no longer in the
+        // book is cancelled regardless of whether its (version-fragile) ack arrived.
+        conn.ForceRefreshTPSL();
+
+        var rows = new List<object>();
+        int ok = 0, fail = 0;
+        foreach ((long id, string? parseError, NotificationMessageData? result) in sent)
+        {
+            if (parseError != null)
+            {
+                rows.Add(new { id = parseError, success = false, message = "invalid id" });
                 fail++;
                 continue;
             }
-            NotificationMessageData? result = conn.CancelTPSL(id);
-            bool success = result != null && result.IsOk;
+            bool gone = conn.TPSLStore?.GetById(id) == null;
+            bool ackOk = result != null && result.IsOk;
+            bool success = gone || ackOk;
             if (success) ok++; else fail++;
             rows.Add(new
             {
                 id,
                 success,
-                notificationCode = result?.notificationCode.ToString() ?? "TIMEOUT",
-                message = result?.msgString ?? "no response"
+                notificationCode = ackOk ? result!.notificationCode.ToString()
+                                 : gone ? "VERIFIED"
+                                 : result?.notificationCode.ToString() ?? "TIMEOUT",
+                message = ackOk ? (result!.msgString ?? "")
+                        : gone ? "cancelled (verified via TPSL book)"
+                        : result?.msgString ?? "no response — still present, re-check `tpsl list`"
             });
         }
         return CommandResult.Ok(
@@ -372,7 +446,7 @@ public sealed class TPSLCommand : ICommand
                 fail++;
                 continue;
             }
-            NotificationMessageData? result = conn.SplitTPSL(new TPSLInfoData { id = id });
+            NotificationMessageData? result = conn.SplitTPSL(new TPSLInfoData { id = id }, timeoutMs: 4_000);
             bool success = result != null && result.IsOk;
             if (success) ok++; else fail++;
             rows.Add(new
@@ -448,7 +522,7 @@ public sealed class TPSLCommand : ICommand
                 fail++;
                 continue;
             }
-            var r = PanicSingle(conn, id);
+            var r = PanicSingle(conn, id, verifyTimeoutMs: 3_000);
             if (r.Success) ok++; else fail++;
             rows.Add(new { id, success = r.Success, r.NotificationCode, r.Message });
         }
@@ -463,7 +537,8 @@ public sealed class TPSLCommand : ICommand
     /// active TPSL subscription (`tpsl subscribe`) the store is empty and
     /// the lookup fails with a "subscribe first" diagnostic.
     /// </summary>
-    private static (bool Success, string NotificationCode, string Message) PanicSingle(CoreConnection conn, long tpslId)
+    private static (bool Success, string NotificationCode, string Message) PanicSingle(
+        CoreConnection conn, long tpslId, int verifyTimeoutMs = 6_000)
     {
         if (conn.TPSLStore?.GetById(tpslId) == null)
         {
@@ -475,12 +550,81 @@ public sealed class TPSLCommand : ICommand
         // so the server can bind by the full identity tuple. Closing through
         // ClosePositionByTPSL with a sparse PositionData stub was the prior
         // approach and was silently rejected.
-        NotificationMessageData? result = conn.PanicSellTpsl(tpslId);
+        // Short ack timeout: the PanicSellNotificationData ack is version-fragile.
+        // Panic MARKET-closes the underlying position, which removes the TPSL
+        // entry from the book — that disappearance is the version-robust proof.
+        NotificationMessageData? result = conn.PanicSellTpsl(tpslId, timeoutMs: 4_000);
+        bool gone = WaitForTpslGone(conn, tpslId, verifyTimeoutMs, 750);
+        if (gone)
+        {
+            return result != null && result.IsOk
+                ? (true, result.notificationCode.ToString(), result.msgString ?? "")
+                : (true, "VERIFIED", "closed (verified via TPSL book; wire ack not received)");
+        }
         if (result == null)
         {
-            return (false, "TIMEOUT", "no response from tpsl panic");
+            return (false, "UNCONFIRMED",
+                "no wire ack and TPSL still present after verify window — re-check `tpsl list`");
         }
         return (result.IsOk, result.notificationCode.ToString(), result.msgString ?? "");
+    }
+
+    // ── Book-verified confirmation ───────────────────────────────────────
+    //
+    // The TPSL mutator acks (TPSLCancelNotificationData, PanicSellNotificationData,
+    // OrderSplitNotificationData, OrderJoinNotificationData) all arrive on the
+    // shared notification channel and have been renamed / re-typed / dropped
+    // across CORE builds, so a missing ack is NOT proof of failure. These helpers
+    // confirm the effect against the observable TPSL book instead, which keeps the
+    // mutators correct on 25810 and future versions regardless of ack behaviour.
+
+    /// <summary>Poll the TPSL book until <paramref name="id"/> is gone or the
+    /// timeout elapses. Used by cancel and panic — both remove the entry (cancel
+    /// drops the bracket, panic MARKET-closes the position). Each poll forces a
+    /// fresh transient subscribe so the store reflects the current server state.</summary>
+    private static bool WaitForTpslGone(CoreConnection conn, long id, int timeoutMs, int pollMs)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            conn.ForceRefreshTPSL(2_000);
+            if (conn.TPSLStore?.GetById(id) == null) { return true; }
+            if (sw.ElapsedMilliseconds >= timeoutMs) { return false; }
+            System.Threading.Thread.Sleep(pollMs);
+        }
+    }
+
+    /// <summary>Signature of the whole TPSL book (sorted ids + per-entry split /
+    /// join / running state). A change after a split or join is the version-robust
+    /// proof the mutation took effect — those ops rewrite entries in place / merge
+    /// ids rather than removing a single known id, so "gone" doesn't apply.</summary>
+    private static string TpslBookSignature(CoreConnection conn)
+    {
+        TPSLStore? store = conn.TPSLStore;
+        if (store == null) { return ""; }
+        var sb = new StringBuilder();
+        foreach (TPSLPositionSnapshot p in store.GetAll())
+        {
+            sb.Append(p.Id).Append(':')
+              .Append(p.SplitCount).Append('x').Append(p.SplitPercentage.ToString("F1")).Append(':')
+              .Append(p.UseJoinKey).Append(':').Append(p.JoinKey).Append(':')
+              .Append(p.IsRunning).Append('|');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Poll until the TPSL book signature differs from
+    /// <paramref name="beforeSig"/> or the timeout elapses. Used by split and join.</summary>
+    private static bool WaitForTpslBookChange(CoreConnection conn, string beforeSig, int timeoutMs, int pollMs)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            conn.ForceRefreshTPSL(2_000);
+            if (TpslBookSignature(conn) != beforeSig) { return true; }
+            if (sw.ElapsedMilliseconds >= timeoutMs) { return false; }
+            System.Threading.Thread.Sleep(pollMs);
+        }
     }
 
 }
