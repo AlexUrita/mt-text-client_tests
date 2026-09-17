@@ -668,6 +668,28 @@ public sealed class AccountStore
         return null;
     }
 
+    /// <summary>Get the raw vendor PositionData for a symbol regardless of the
+    /// caller-supplied side, or null if not found / ambiguous. One-way (non-hedge)
+    /// positions are keyed <c>BOTH</c> in the CORE book but displayed as
+    /// LONG/SHORT, so a caller passing <c>side=LONG</c> for such a position would
+    /// miss the exact <c>{symbol}:LONG</c> lookup; this recovers it. Returns null
+    /// when more than one side is open on the symbol (hedge account) so the
+    /// caller must disambiguate with an explicit side.</summary>
+    public PositionData? GetPositionRawBySymbol(string symbol)
+    {
+        if (string.IsNullOrEmpty(symbol)) { return null; }
+        PositionData? match = null;
+        foreach (KeyValuePair<string, PositionData> kvp in _positionsRaw)
+        {
+            if (string.Equals(kvp.Value.symbol, symbol, StringComparison.OrdinalIgnoreCase))
+            {
+                if (match != null) { return null; } // ambiguous — >1 side open
+                match = kvp.Value;
+            }
+        }
+        return match;
+    }
+
     /// <summary>Get orders for a specific symbol.</summary>
     public IReadOnlyList<OrderSnapshot> GetOrdersBySymbol(string symbol)
     {
