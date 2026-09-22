@@ -279,8 +279,20 @@ public sealed class ReportsCommand : ICommand
             return CommandResult.Ok(msg);
         }
 
-        // Sort by close time descending
-        var sorted = new List<ReportData>(reports);
+        // Sort by close time descending. Filter null rows first: a core whose
+        // wire layout has drifted from the pinned DLL can deserialise the list
+        // with null (or partially-null) elements, which would NRE in the sort
+        // comparer and every downstream loop. Dropping them degrades to a partial
+        // result with a visible note instead of an opaque crash.
+        var sorted = new List<ReportData>(reports.Count);
+        foreach (ReportData r in reports)
+        {
+            if (r != null)
+            {
+                sorted.Add(r);
+            }
+        }
+        int droppedRows = reports.Count - sorted.Count;
         sorted.Sort((a, b) => b.reportTime.CompareTo(a.reportTime));
 
         // Summary statistics
@@ -446,7 +458,19 @@ public sealed class ReportsCommand : ICommand
             });
         }
 
-        string? header = $"[{conn.Name}] Trade Reports — {rangeLabel} | {sorted.Count} trades";
+        string? buildWarning = conn.CoreStatusStore.BuildMismatchWarning();
+        var headerNotes = new StringBuilder();
+        if (buildWarning != null)
+        {
+            headerNotes.Append($"⚠ {buildWarning}\n");
+        }
+
+        if (droppedRows > 0)
+        {
+            headerNotes.Append($"⚠ Dropped {droppedRows} unreadable trade row(s) — possible core/client build skew.\n");
+        }
+
+        string? header = headerNotes.ToString() + $"[{conn.Name}] Trade Reports — {rangeLabel} | {sorted.Count} trades";
         string? table = rows.ToString();
 
         // Per-algo breakdown
@@ -534,6 +558,8 @@ public sealed class ReportsCommand : ICommand
         {
             Server = conn.Name,
             Exchange = conn.Profile.Exchange.ToString(),
+            BuildMismatchWarning = buildWarning,
+            DroppedRows = droppedRows,
             Period = rangeLabel,
             FromUnix = unixFrom,
             ToUnix = unixTo,
@@ -684,7 +710,7 @@ public sealed class ReportsCommand : ICommand
         };
 
     private static string Trunc(string s, int max) =>
-        s.Length <= max ? s : s[..max];
+        string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max]);
 
 
 
