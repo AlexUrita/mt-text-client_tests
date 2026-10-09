@@ -237,6 +237,16 @@ public static class Program
                 break;
             }
 
+            // Strip a leading UTF-8 BOM (U+FEFF). When stdin is a redirected pipe, the
+            // first line can arrive BOM-prefixed; string.Trim() does NOT remove U+FEFF
+            // (it is not classified as whitespace), so without this the first command
+            // parses as "<BOM>connect" -> "Unknown command". Mirrors the BOM handling
+            // already applied on the MCP/file paths (McpServer.cs).
+            if (input.Length > 0 && input[0] == (char)0xFEFF)
+            {
+                input = input.Substring(1);
+            }
+
             input = input.Trim();
 
             if (string.IsNullOrEmpty(input))
