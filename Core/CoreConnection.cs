@@ -598,6 +598,20 @@ public sealed class CoreConnection : IDisposable
     //
     // The data is fed back through AccountStore.ProcessData so subsequent
     // reads from the long-lived store see the snapshot.
+    // Scale the post-first-drop grace window with the OBSERVED first-drop latency so a
+    // high-RTT (remote) core gets enough time for the trailing initial-list segments,
+    // while a local core keeps the historical floor. Capped so a slow/variable core
+    // can't stall the read. Fixes place/subscription reads that needed several re-runs
+    // on a remote core: the old FIXED grace was shorter than the remote push settle
+    // (measured ~360ms local vs ~650ms remote for a UDS orders refresh).
+    private static Int32 ScaledGraceMs(Int64 firstDropMs, Int32 floorMs)
+    {
+        Int64 scaled = firstDropMs + 100;
+        if (scaled < floorMs) { scaled = floorMs; }
+        if (scaled > 1_500) { scaled = 1_500; }
+        return (Int32)scaled;
+    }
+
     private bool ReadFreshUDSData<T>(NetworkMessageType msgType, int timeoutMs = 5_000)
         where T : NetworkData
     {
@@ -608,6 +622,7 @@ public sealed class CoreConnection : IDisposable
         int subId = -1;
         try
         {
+            Int64 subscribeTick = Environment.TickCount64;
             subId = _udpClient.SendUDSSubscribe(
                 Profile.Exchange,
                 (NetworkMessageType _, NetworkData data) =>
@@ -622,11 +637,12 @@ public sealed class CoreConnection : IDisposable
                 -1,
                 NetworkMessagePriority.HIGH);
 
-            // Wait for first drop; once we have one, give a small grace
-            // window for any remaining markets to arrive.
+            // Wait for first drop; once we have one, give a grace window for any
+            // remaining markets to arrive — scaled to the observed first-drop latency
+            // so a remote (high-RTT) core gets enough time (local keeps the 250ms floor).
             if (done.Wait(timeoutMs))
             {
-                System.Threading.Thread.Sleep(250);
+                System.Threading.Thread.Sleep(ScaledGraceMs(Environment.TickCount64 - subscribeTick, 250));
             }
 
             lock (collected)
@@ -708,6 +724,7 @@ public sealed class CoreConnection : IDisposable
         int dropsReceived = 0;
         try
         {
+            Int64 subscribeTick = Environment.TickCount64;
             subId = _udpClient.SendAlgorithmsSubscribe(
                 (NetworkMessageType msgType, NetworkData data) =>
                 {
@@ -717,8 +734,9 @@ public sealed class CoreConnection : IDisposable
                 });
             if (done.Wait(timeoutMs))
             {
-                // Grace window for the rest of the snapshot to arrive.
-                System.Threading.Thread.Sleep(500);
+                // Grace window for the rest of the snapshot to arrive — scaled to the
+                // observed first-drop latency so a remote core gets enough time.
+                System.Threading.Thread.Sleep(ScaledGraceMs(Environment.TickCount64 - subscribeTick, 500));
             }
             return dropsReceived > 0;
         }
@@ -751,6 +769,7 @@ public sealed class CoreConnection : IDisposable
         int dropsReceived = 0;
         try
         {
+            Int64 subscribeTick = Environment.TickCount64;
             subId = _udpClient.SendAlgorithmTPSLsSubscribe(
                 (TPSLInfoListData data) =>
                 {
@@ -761,9 +780,10 @@ public sealed class CoreConnection : IDisposable
                 -1);
             if (done.Wait(timeoutMs))
             {
-                // Grace window for the rest of the snapshot to arrive
-                // (multi-market initial-list comes in segments on some venues).
-                System.Threading.Thread.Sleep(500);
+                // Grace window for the rest of the snapshot to arrive — scaled to the
+                // observed first-drop latency (multi-market initial-list comes in
+                // segments on some venues; a remote core needs a wider window).
+                System.Threading.Thread.Sleep(ScaledGraceMs(Environment.TickCount64 - subscribeTick, 500));
             }
             return dropsReceived > 0;
         }
