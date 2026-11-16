@@ -333,6 +333,46 @@ public sealed class CoreConnection : IDisposable
         // initial Subscribe means SendAlgorithmRequest etc. can rely on the
         // TCS queue path from the first connect onward.
         SubscribeNotifications();
+
+        // 6. Warm up the TRANSIENT notification-subscription path used by
+        // SendAndAwaitNotification. The persistent subscription above is a
+        // separate subscriber; the per-request path opens its own transient
+        // SendNotificationSubscribe and the FIRST one after a fresh connect
+        // can lose a race with a fast async accept-ack (e.g. the async
+        // STOP_ALL reply arrives in ~1 RTT, before the core has registered
+        // this client's transient subscriber), dropping that ack so the
+        // caller blocks to its timeout. Prime the transient path once here,
+        // off the connect thread, so the user's first real request is warm.
+        WarmUpTransientNotifications();
+    }
+
+    // Fire a throwaway transient notification subscription so the core
+    // registers this client's transient-subscriber routing before the first
+    // real SendAndAwaitNotification. Best-effort, off the connect thread, and
+    // released after a short window — see the cold-start race note in Subscribe().
+    private void WarmUpTransientNotifications()
+    {
+        if (_udpClient == null) { return; }
+        try
+        {
+            int warmId = _udpClient.SendNotificationSubscribe(
+                Profile.Exchange,
+                static (AbstractNotificationData _) => { /* discard — priming only */ },
+                -1);
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await System.Threading.Tasks.Task.Delay(2_000).ConfigureAwait(false);
+                    if (_udpClient != null)
+                    {
+                        _udpClient.SendNotificationUnsubscribe(ref warmId, Profile.Exchange);
+                    }
+                }
+                catch { /* best-effort release */ }
+            });
+        }
+        catch { /* best-effort warmup */ }
     }
 
     private void Unsubscribe()
@@ -866,7 +906,7 @@ public sealed class CoreConnection : IDisposable
             AlgoActionType.START => new AlgorithmRunRequestData { algorithmID = algoData.id },
             AlgoActionType.STOP => new AlgorithmStopRequestData { algorithmID = algoData.id },
             AlgoActionType.START_ALL => new AlgorithmsRunAllRequestData(),
-            AlgoActionType.STOP_ALL => new AlgorithmsStopAllRequestData(),
+            AlgoActionType.STOP_ALL => new AlgorithmsStopAllRequestData() { AsyncMode = true },
             AlgoActionType.DELETE => new AlgorithmRemoveRequestData { algorithmID = algoData.id },
             AlgoActionType.TOGGLE_DEBUG => new AlgorithmToggleDebagRequestData { algorithmID = algoData.id },
             AlgoActionType.SAVE or AlgoActionType.SAVE_START => algoData.id > 0

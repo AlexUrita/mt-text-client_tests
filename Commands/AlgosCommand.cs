@@ -477,6 +477,12 @@ public sealed class AlgosCommand : ICommand
 
     #region Start / Stop
 
+    // Short accept-ack wait for the async STOP_ALL. Warm acks land in ~0.4s and a
+    // cold-start ack in ~1.8s; 5s gives generous margin yet stays under the test
+    // runner's 8s stop-fire window, so even a dropped ack returns a clean
+    // "accepted (async)" instead of a long hang. See the STOP_ALL branch below.
+    private const int STOP_ALL_ACK_TIMEOUT_MS = 5_000;
+
     private CommandResult AlgoAction(string[] args, AlgoActionType actionType, string? targetProfile)
     {
         CoreConnection? conn = ResolveConnection(targetProfile, out CommandResult? error);
@@ -542,12 +548,28 @@ public sealed class AlgosCommand : ICommand
         else
         {
             // START_ALL / STOP_ALL — AlgorithmsRun/StopAllRequestData, no payload.
+            //
+            // STOP_ALL is dispatched with AsyncMode=true (see BuildAlgorithmRequest):
+            // the core accepts the request and stops algorithms in the background,
+            // replying with a prompt accept-ack (~1 RTT) instead of blocking to
+            // completion. Wait only a short window for that ack so a dropped/late
+            // ack (the cold-start transient-subscription race) can't hang the caller
+            // for the full default timeout. The core executes regardless, so a
+            // missing ack is reported as ACCEPTED (not a timeout) and callers verify
+            // the result with `algos list`. START_ALL keeps the default wait.
+            bool asyncStopAll = actionType == AlgoActionType.STOP_ALL;
+            int timeoutMs = asyncStopAll ? STOP_ALL_ACK_TIMEOUT_MS : 30_000;
+
             NotificationMessageData? notification =
-                conn.SendAlgorithmRequest(new AlgorithmData(), actionType);
+                conn.SendAlgorithmRequest(new AlgorithmData(), actionType, timeoutMs);
 
             if (notification == null)
             {
-                return CommandResult.Ok($"[{conn.Name}] {actionType} sent (response timed out).");
+                return asyncStopAll
+                    ? CommandResult.Ok(
+                        $"[{conn.Name}] {actionType} accepted (async) — stopping in background; verify with `algos list`.",
+                        new { Server = conn.Name, Action = actionType.ToString(), Async = true, AckReceived = false })
+                    : CommandResult.Ok($"[{conn.Name}] {actionType} sent (response timed out).");
             }
 
             return notification.IsOk

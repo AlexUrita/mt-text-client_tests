@@ -1,6 +1,6 @@
 {
-  "version": "725949",
-  "core_build": "0.7.25949",
+  "version": "726548",
+  "core_build": "0.7.26548",
   "platforms": {
     "osx-arm64": {
       "url": "https://cdn3.moontrader.com/beta/macos-arm64/MoonTrader-macos-arm64-version_725925.tar.xz",
@@ -74,7 +74,7 @@
       "files": {
         "MTShared.dll": {
           "path": "BotClient/lib/MTShared.dll",
-          "sha256": "13cbb04c0ceb449dcb287a4073b4ccb92a0021d72f2d99be9b1b68a34fff7a48"
+          "sha256": "8ff0c3adddbba7bc8e0f14c67fc6329f035f89438be1e466c3c2d5e4171b7eaf"
         },
         "LiteNetLib.dll": {
           "path": "lib/LiteNetLib.dll",
