@@ -58,6 +58,19 @@ public sealed class CoreConnection : IDisposable
     // canonical pattern (see SendAndAwaitNotification) opens a transient
     // SendNotificationSubscribe per request with a typed handler, so the
     // long-lived dispatcher no longer needs to fan responses out by FIFO.
+    //
+    // Reconciliation fallback (re-added, but complementary — NOT the old FIFO
+    // queues): the transient per-request subscriber can still MISS an ack when
+    // the core's reply wins the cold-start / high-RTT registration race
+    // (see WarmUpTransientNotifications). Each in-flight SendAndAwaitNotification
+    // registers its typed delivery handler here under a unique token; the
+    // long-lived SubscribeNotifications dispatcher feeds these handlers too, so
+    // an ack the transient path dropped still completes the waiter. The transient
+    // subscription remains the primary path — this only catches what it misses.
+    // Same-profile dispatch is serialized, so at most one handler is live per
+    // connection; handlers self-filter by notification type and no-op once their
+    // BlockingCollection is disposed.
+    private readonly ConcurrentDictionary<object, Action<AbstractNotificationData>> _pendingNotificationWaiters = new ConcurrentDictionary<object, Action<AbstractNotificationData>>();
     private int _alertsSubscriptionId;
     private int _alertHistorySubscriptionId;
     private readonly ConcurrentDictionary<string, int> _tradeSubscriptionIds = new ConcurrentDictionary<string, int>();
@@ -583,19 +596,27 @@ public sealed class CoreConnection : IDisposable
 
         var wait = new System.Collections.Concurrent.BlockingCollection<NotificationMessageData>(boundedCapacity: 8);
         int subId = -1;
+
+        // One delivery handler, fed by BOTH the transient per-request subscription
+        // (primary) and the long-lived SubscribeNotifications dispatcher (fallback,
+        // via _pendingNotificationWaiters). Whichever path sees the typed ack first
+        // completes the wait; a second delivery is a harmless no-op (TryAdd on a
+        // full/disposed collection is caught). This closes the cold-start / high-RTT
+        // race where the core's reply beats the transient subscriber registration.
+        void Deliver(AbstractNotificationData data)
+        {
+            if (data is TNotification typed)
+            {
+                try { wait.TryAdd(build(typed)); }
+                catch { /* collection disposed in finally — drop */ }
+            }
+        }
+
+        var waiterToken = new object();
+        _pendingNotificationWaiters[waiterToken] = Deliver;
         try
         {
-            subId = _udpClient.SendNotificationSubscribe(
-                Profile.Exchange,
-                (AbstractNotificationData data) =>
-                {
-                    if (data is TNotification typed)
-                    {
-                        try { wait.TryAdd(build(typed)); }
-                        catch { /* collection disposed in finally — drop */ }
-                    }
-                },
-                -1);
+            subId = _udpClient.SendNotificationSubscribe(Profile.Exchange, Deliver, -1);
 
             send();
 
@@ -613,6 +634,10 @@ public sealed class CoreConnection : IDisposable
         }
         finally
         {
+            // Deregister the fallback handler BEFORE disposing the collection so
+            // the long-lived dispatcher can't invoke it against a disposed wait
+            // (the handler's own TryAdd/catch guards the window either way).
+            _pendingNotificationWaiters.TryRemove(waiterToken, out _);
             if (subId != -1 && _udpClient != null)
             {
                 try { _udpClient.SendNotificationUnsubscribe(ref subId, Profile.Exchange); }
@@ -1748,10 +1773,17 @@ public sealed class CoreConnection : IDisposable
             return;
         }
 
-        // Long-lived passive subscription — only used to populate
-        // NotificationStore for the mt_notifications_list tool. Per-request
-        // wire dispatching is handled by transient subscriptions inside
-        // SendAndAwaitNotification, mirroring the vendor BotClient pattern.
+        // Long-lived subscription with two jobs:
+        //   1. Populate NotificationStore for the mt_notifications_list tool.
+        //   2. Act as the reconciliation FALLBACK for in-flight per-request
+        //      waiters. Per-request wire dispatching is still primarily handled
+        //      by the transient subscriptions inside SendAndAwaitNotification
+        //      (the vendor BotClient pattern); but that transient subscriber can
+        //      miss an ack on the cold-start / high-RTT registration race, so we
+        //      also fan each notification out to any registered pending waiter.
+        //      Handlers self-filter by type and no-op once completed/disposed, so
+        //      this is harmless when no waiter is pending or the transient path
+        //      already won.
         _notificationSubscriptionId = _udpClient.SendNotificationSubscribe(
             Profile.Exchange,
             (AbstractNotificationData data) =>
@@ -1761,6 +1793,16 @@ public sealed class CoreConnection : IDisposable
                 string profileName = data.profileName ?? Profile.Name;
                 var entry = new NotificationEntry(profileName, typeName, message, "", data.creationTime);
                 NotificationStore.Add(entry);
+
+                // Fallback dispatch to any per-request waiter the transient
+                // subscription may have missed. Runs on the receive thread;
+                // _pendingNotificationWaiters is concurrent and each handler is
+                // independently guarded.
+                foreach (var waiter in _pendingNotificationWaiters.Values)
+                {
+                    try { waiter(data); }
+                    catch { /* best-effort; a disposed waiter is a no-op */ }
+                }
             },
             _notificationSubscriptionId);
 
