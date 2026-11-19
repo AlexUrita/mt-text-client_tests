@@ -709,14 +709,13 @@ public sealed class ExchangeCommand : ICommand
         string quote = conn.ExchangeInfoStore.GetTradePair(symbol)?.QuoteAsset ?? "";
 
         conn.SubscribeLiveMarkets(marketType, symbol, quote);
-        // Wait briefly for a metrics push.
+        // Block (event-signalled) until the first LiveMarketMetrics push lands, up
+        // to 6s — no busy-poll, and returns the instant the push arrives (~650ms on
+        // a remote core) instead of rounding up to the next 200ms sleep boundary.
+        // WaitForKey is race-safe against a push that arrives before the wait.
         string storeKey = $"{symbol}:{marketType}";
-        LiveMarketEntry? entry = null;
-        for (int i = 0; i < 30; i++)
-        {
-            if (conn.LiveMarketStore.TryGet(storeKey, out var e)) { entry = e; break; }
-            System.Threading.Thread.Sleep(200);
-        }
+        conn.LiveMarketStore.WaitForKey(storeKey, 6_000);
+        LiveMarketEntry? entry = conn.LiveMarketStore.TryGet(storeKey, out var e) ? e : null;
         if (entry == null)
             return CommandResult.Fail(
                 $"funding_rate_unavailable: no LiveMarketMetrics push received for {symbol} ({marketType}) within 6s.  " +
