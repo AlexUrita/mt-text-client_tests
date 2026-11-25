@@ -648,18 +648,23 @@ public sealed class AccountStore
 
     /// <summary>Get the raw vendor PositionData for a symbol + side, or null
     /// if not in cache. ClosePositionByTPSL / ResetTPSL / ChangePositionMargin
-    /// need the full vendor object echoed back.</summary>
+    /// need the full vendor object echoed back.
+    /// Only OPEN positions are returned: the CORE snapshot carries every side per
+    /// symbol, including CLOSED ones (e.g. a stale <c>avaxusdt:BOTH</c> on a HEDGE
+    /// account). Echoing a closed PositionData makes the CORE silently drop the
+    /// request with no ack ("No response from reset-tpsl.").</summary>
     public PositionData? GetPositionRaw(string symbol, PositionSide positionSide)
     {
         if (string.IsNullOrEmpty(symbol)) { return null; }
         string key = $"{symbol}:{positionSide}";
         _positionsRaw.TryGetValue(key, out PositionData? raw);
-        if (raw != null) { return raw; }
+        if (raw != null && raw.IsOpen) { return raw; }
         // Case-insensitive fallback for symbols stored lowercase (BYBIT) or
         // mixed-case (other venues).
         foreach (KeyValuePair<string, PositionData> kvp in _positionsRaw)
         {
-            if (string.Equals(kvp.Value.symbol, symbol, StringComparison.OrdinalIgnoreCase)
+            if (kvp.Value.IsOpen
+                && string.Equals(kvp.Value.symbol, symbol, StringComparison.OrdinalIgnoreCase)
                 && kvp.Value.positionSide == positionSide)
             {
                 return kvp.Value;
@@ -674,14 +679,16 @@ public sealed class AccountStore
     /// LONG/SHORT, so a caller passing <c>side=LONG</c> for such a position would
     /// miss the exact <c>{symbol}:LONG</c> lookup; this recovers it. Returns null
     /// when more than one side is open on the symbol (hedge account) so the
-    /// caller must disambiguate with an explicit side.</summary>
+    /// caller must disambiguate with an explicit side. Closed (stale) sides are
+    /// ignored, so they neither match nor make the lookup ambiguous.</summary>
     public PositionData? GetPositionRawBySymbol(string symbol)
     {
         if (string.IsNullOrEmpty(symbol)) { return null; }
         PositionData? match = null;
         foreach (KeyValuePair<string, PositionData> kvp in _positionsRaw)
         {
-            if (string.Equals(kvp.Value.symbol, symbol, StringComparison.OrdinalIgnoreCase))
+            if (kvp.Value.IsOpen
+                && string.Equals(kvp.Value.symbol, symbol, StringComparison.OrdinalIgnoreCase))
             {
                 if (match != null) { return null; } // ambiguous — >1 side open
                 match = kvp.Value;

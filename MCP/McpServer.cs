@@ -6,6 +6,7 @@ using System.IO;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using MTTextClient.Commands;
@@ -1190,8 +1191,11 @@ public sealed class McpServer
             // order_type is appended as `--order-type <type>` when provided.
             // The handler defaults to MARKET when the flag is absent — back-compat with
             // earlier callers that didn't pass order_type.
-            "mt_orders_close_by_tpsl" => $"orders close-by-tpsl {arguments["symbol"]?.Value<string>() ?? ""} {arguments["market"]?.Value<string>() ?? ""} {arguments["side"]?.Value<string>() ?? ""}{BuildOrderTypeArg(arguments)}{profileSuffix}{confirm}",
-            "mt_orders_reset_tpsl" => $"orders reset-tpsl {arguments["symbol"]?.Value<string>() ?? ""} {arguments["market"]?.Value<string>() ?? ""} {arguments["side"]?.Value<string>() ?? ""}{profileSuffix}{confirm}",
+            // market/side are emitted as --market/--side FLAGS: both parsers only read
+            // flags, so the old positional form silently dropped them (side fell back to
+            // BOTH, which on a HEDGE account could resolve a stale closed position).
+            "mt_orders_close_by_tpsl" => $"orders close-by-tpsl {arguments["symbol"]?.Value<string>() ?? ""}{BuildPositionFlags(arguments)}{BuildOrderTypeArg(arguments)}{profileSuffix}{confirm}",
+            "mt_orders_reset_tpsl" => $"orders reset-tpsl {arguments["symbol"]?.Value<string>() ?? ""}{BuildPositionFlags(arguments)}{profileSuffix}{confirm}",
             // Active Order TP/SL/TS Update
             "mt_orders_update_tpsl" => BuildUpdateOrderTpslCommand(arguments, profileSuffix, confirm),
 
@@ -1371,6 +1375,28 @@ public sealed class McpServer
         string norm = ot.Trim().ToUpperInvariant();
         if (norm != "MARKET" && norm != "LIMIT") return "";
         return $" --order-type {norm}";
+    }
+
+    /// <summary>
+    /// Render optional <c>--market</c> / <c>--side</c> flags for the position-scoped
+    /// TPSL commands (reset-tpsl / close-by-tpsl). Values are a single token
+    /// (whitespace stripped, upper-cased) so a value can't smuggle extra flags; an
+    /// absent/blank value emits nothing (the command keeps its FUTURES / BOTH default).
+    /// </summary>
+    private static string BuildPositionFlags(JObject arguments)
+    {
+        string flags = "";
+        string? market = arguments["market"]?.Value<string>();
+        if (!string.IsNullOrWhiteSpace(market))
+        {
+            flags += $" --market {Regex.Replace(market, @"\s+", "").ToUpperInvariant()}";
+        }
+        string? side = arguments["side"]?.Value<string>();
+        if (!string.IsNullOrWhiteSpace(side))
+        {
+            flags += $" --side {Regex.Replace(side, @"\s+", "").ToUpperInvariant()}";
+        }
+        return flags;
     }
 
     /// <summary>
