@@ -9,6 +9,26 @@ Versions follow [SemVer](https://semver.org).
 
 ## Unreleased
 
+### MTCore 0.7.26721 vendor upgrade
+
+Re-pinned the win-x64 `MTShared.dll` to 0.7.26721. That build inserts
+`maxOrderBufferType` (byte) + `maxOrderBuffer` (float) into `OrderRequestData`
+after `orderAutoAdjustment`, and appends `dontMoveLimitStopAfterPrice` to
+`StopLossSettings`; against a 26721 core the old DLL mis-framed every order
+request ("sent (response timed out)"). Manual orders leave the new fields at
+their defaults, as the native client does.
+
+Auto-stops follow the 26721 schema: `AutoStopOnBalanceData` now carries
+`maxLossThreshold` (toggle+value, stored as -|x|), `quoteAsset`, `stopKeywords`,
+explicit `stopEnabled`/`pauseEnabled`/`panicSellEnabled` actions; `add` enables
+the stop action. The explicit baseline-recalculation request was removed by the
+core; `mt_autostops_baseline` now reports the core-pushed baselines
+(`AutoStopOnBalanceValuesEvent`), which `mt_autostops_list` also shows. List
+output keeps the legacy JSON keys; `algorithmCount`/`currentBalance` are gone.
+
+The osx-arm64, osx-x64, linux-x64 and linux-arm64 pins still carry the older
+assemblies: no 726721 archives are published on the CDN yet.
+
 ### Callback request completion and timeouts
 
 Callback-based alert, dust, deposit, market-data, profile-settings, and

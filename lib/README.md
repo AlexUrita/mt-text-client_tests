@@ -4,12 +4,14 @@
 `LiteNetLib.dll` supplies its UDP transport. Both are managed assemblies pinned in
 [`vendor.json`](vendor.json) and verified by SHA-256 on every build.
 
-The client is pinned to MTCore **0.7.25925** (archive version **725925**) in
+The client is pinned to MTCore **0.7.26721** (archive version **726721**) in
 [`vendor.json`](vendor.json). This build is **not yet published on the CDN**, so the
 verified per-platform pair is committed under `lib/<rid>/`: `fetch_vendor_libs.py`
 finds the committed, hash-matching DLLs and skips the download. Once the archives
 are published, the `url`/`sha256` entries let a `--force` fetch reproduce the exact
-same bytes. Builds do not follow the CDN's moving `version.txt`: a newer release
+same bytes. **Only `win-x64` carries the 0.7.26721 pair** (taken from a verified local
+installer); the macOS and Linux entries still pin the older 725925 archives and
+assemblies until 726721 archives are published. Builds do not follow the CDN's moving `version.txt`: a newer release
 can change the protocol and require source changes.
 
 ## Build prerequisites and selection
@@ -41,7 +43,7 @@ Use an explicit RID when the Python and .NET processes have different architectu
 | `osx-x64` | `macosx-x86_64` | `MoonTrader-macosx-x86_64-version_725925.tar.xz` |
 | `linux-x64` | `linux-x86_64` | `MoonTrader-linux-x86_64-version_725925.tar.xz` |
 | `linux-arm64` | `linux-arm64` | `MoonTrader-linux-arm64-version_725925.tar.xz` |
-| `win-x64` | `windows-x86_64` | `MoonTrader-windows-x86_64-version_725925.exe` |
+| `win-x64` | `windows-x86_64` | `MoonTrader-windows-x86_64-version_726721.exe` |
 
 Other targets fail explicitly, including native Windows ARM64. Selecting a target
 for a cross-build verifies and compiles its assemblies; running its tests still

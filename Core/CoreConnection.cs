@@ -1552,13 +1552,10 @@ public sealed class CoreConnection : IDisposable
 
     #region AutoStops
 
-    /// <summary>
-    /// Request autostop baseline recalculation (fire-and-forget).
-    /// </summary>
-    public void SendAutoStopsBaselineRequest()
-    {
-        _udpClient?.SendAutoStopsBaselineRequest();
-    }
+    // MTCore 0.7.26721 removed UDPClient.SendAutoStopsBaselineRequest (and the
+    // AUTOSTOP_BASELINE_UPDATE notification): balance baselines are now pushed
+    // on the AUTO_STOP subscription as AutoStopOnBalanceValuesEvent, which
+    // ForceRefreshAutoStops() feeds into AutoStopStore.
 
     /// <summary>
     /// Request autostop algorithm report data for specific algorithm IDs.

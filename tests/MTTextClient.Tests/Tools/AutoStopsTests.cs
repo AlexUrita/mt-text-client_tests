@@ -37,7 +37,7 @@ public sealed class AutoStopsTests
 
     [SkippableFact]
     [Trait("Category", TraitCategories.Smoke)]
-    public async Task mt_autostops_baseline_acknowledges_recalculation_request()
+    public async Task mt_autostops_baseline_reports_core_pushed_baselines()
     {
         Skip.If(!EnvFlags.TestingEnv || !_bench.BenchAvailable, _bench.PreflightMessage);
         await _mcp.WaitForConnected(EnvFlags.DefaultBenchProfile);
@@ -46,10 +46,11 @@ public sealed class AutoStopsTests
             new { profile = EnvFlags.DefaultBenchProfile });
         resp.InnerSuccess.Should().BeTrue();
 
-        // Fire-and-forget: handler returns text-only Ok with a recalc-ack message.
+        // MTCore 0.7.26721 removed the recalculation request; the handler reports
+        // the core-pushed baselines (AutoStopOnBalanceValuesEvent) instead.
         resp.ParsedBody!.Value.TryGetProperty("message", out var msg).Should().BeTrue();
         (msg.GetString() ?? "").Should().Contain("baseline",
-            because: "the response confirms the baseline recalculation was sent");
+            because: "the response reports the core-pushed baselines");
     }
 
     [SkippableFact]

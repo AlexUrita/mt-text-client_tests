@@ -619,7 +619,8 @@ public static class ToolRegistry
             "balance auto-stop is the value to pass to edit/start/stop/delete.",
             Prop("profile", "string", "Target server profile"));
         yield return Tool("mt_autostops_baseline",
-            "Request auto-stop baseline recalculation on Core (fire-and-forget).",
+            "Show the core-pushed balance auto-stop baselines (MTCore 0.7.26721 removed the explicit " +
+            "recalculation request; baselines arrive as AutoStopOnBalanceValuesEvent on the AUTO_STOP subscription).",
             Prop("profile", "string", "Target server profile"));
         yield return Tool("mt_autostops_reports",
             "Get report data for auto-stop algorithms. Optionally filter by algorithm IDs.",
@@ -633,28 +634,28 @@ public static class ToolRegistry
         yield return Tool("mt_autostops_add",
             "Create a new balance auto-stop (AutoStopOnBalanceData). Created disabled — call " +
             "mt_autostops_start to activate. Sends AUTO_STOP_REQUEST(AddRequest) to Core.",
-            Prop("max_loss", "string", "maxLoss threshold (e.g. -0.1, -5.0)", required: true),
+            Prop("max_loss", "string", "Max-loss threshold (maxLossThreshold, stored as -|value|, e.g. -0.1, -5.0)", required: true),
             Prop("name", "string", "Optional display name"),
             Prop("market", "string", "Market type (default FUTURES)"),
-            Prop("asset", "string", "Balance asset to watch (default usdt)"),
-            Prop("keywords", "string", "Optional algo-name keyword filter"),
+            Prop("asset", "string", "Balance quote asset to watch (quoteAsset, default usdt)"),
+            Prop("keywords", "string", "Optional algo-name keyword filter for the stop action (stopKeywords)"),
             Prop("exclude_keywords", "boolean", "Treat keywords as an exclusion filter"),
-            Prop("panic_sell", "boolean", "Panic-sell positions when triggered (panicSellIfTriggered)"),
+            Prop("panic_sell", "boolean", "Panic-sell positions when triggered (panicSellEnabled)"),
             Prop("confirm", "boolean", "Must be true to proceed", required: true),
             Prop("profile", "string", "Target server profile"));
         yield return Tool("mt_autostops_edit",
             "Mutate an existing balance auto-stop by its mt_autostops_list index. " +
             "Only the fields you pass are updated. Sends AUTO_STOP_REQUEST(UpdateRequest).",
             Prop("index", "string", "Zero-based list index (use mt_autostops_list to discover)", required: true),
-            Prop("max_loss", "string", "New maxLoss threshold"),
+            Prop("max_loss", "string", "New max-loss threshold (maxLossThreshold)"),
             Prop("name", "string", "New display name"),
             Prop("market", "string", "Market type"),
             Prop("asset", "string", "New balance asset"),
             Prop("keywords", "string", "New keyword filter"),
             Prop("exclude_keywords", "boolean", "Set keyword exclusion on"),
             Prop("include_keywords", "boolean", "Set keyword exclusion off"),
-            Prop("panic_sell", "boolean", "Set panicSellIfTriggered=true"),
-            Prop("no_panic_sell", "boolean", "Set panicSellIfTriggered=false"),
+            Prop("panic_sell", "boolean", "Set panicSellEnabled=true"),
+            Prop("no_panic_sell", "boolean", "Set panicSellEnabled=false"),
             Prop("enabled", "boolean", "Set isRunning explicitly"),
             Prop("confirm", "boolean", "Must be true to proceed", required: true),
             Prop("profile", "string", "Target server profile"));

@@ -126,8 +126,8 @@ public sealed class PublicIssueRegressionUnitTests
         {
             AutoStopsOnBalance = new List<AutoStopOnBalanceData>
             {
-                new() { id = 123, name = "risk guard", marketType = MarketType.FUTURES, maxLoss = -5, asset = "usdt", keywords = "btcusdt", panicSellIfTriggered = true, isRunning = true },
-                new() { id = 456, name = "second", marketType = MarketType.FUTURES, maxLoss = -10, asset = "usdt", isRunning = false },
+                new() { id = 123, name = "risk guard", marketType = MarketType.FUTURES, maxLossThreshold = new ToggleDoubleValueData(true, -5), quoteAsset = "usdt", stopEnabled = true, stopKeywords = "btcusdt", panicSellEnabled = true, isRunning = true },
+                new() { id = 456, name = "second", marketType = MarketType.FUTURES, maxLossThreshold = new ToggleDoubleValueData(true, -10), quoteAsset = "usdt", isRunning = false },
             },
             AutoStopsOnReports = new List<AutoStopOnReportsData>(),
         };
@@ -135,8 +135,8 @@ public sealed class PublicIssueRegressionUnitTests
 
         store.HasData.Should().BeTrue();
         store.Balance.Should().HaveCount(2);
-        store.FindBalanceById(123)!.maxLoss.Should().Be(-5);
-        store.FindBalanceById(123)!.keywords.Should().Be("btcusdt");
+        store.FindBalanceById(123)!.maxLossThreshold.value.Should().Be(-5);
+        store.FindBalanceById(123)!.stopKeywords.Should().Be("btcusdt");
         store.FindBalanceById(999).Should().BeNull();
 
         // Removed event drops by id; the snapshot order is stable by id.
@@ -148,7 +148,7 @@ public sealed class PublicIssueRegressionUnitTests
     [Trait("Category", "Unit")]
     public void Issue34_balance_request_carries_real_vendor_type()
     {
-        var autostop = new AutoStopOnBalanceData { id = 0, name = "g", marketType = MarketType.FUTURES, maxLoss = -5, asset = "usdt" };
+        var autostop = new AutoStopOnBalanceData { id = 0, name = "g", marketType = MarketType.FUTURES, maxLossThreshold = new ToggleDoubleValueData(true, -5), quoteAsset = "usdt" };
         var req = new AutoStopOnBalanceAddRequestData { AutoStop = autostop };
 
         // The request wraps the genuine MTShared.Network.AutoStopOnBalanceData —

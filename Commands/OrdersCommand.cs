@@ -715,6 +715,10 @@ public sealed class OrdersCommand : ICommand
                 $"  Re-run with --confirm flag.");
         }
 
+        // MTCore 0.7.26721 added OrderRequestData.maxOrderBufferType/maxOrderBuffer (serialized
+        // after orderAutoAdjustment). Left at their defaults ((byte)0 / 0f) to match the native
+        // manual-order paths (BotClient CommandAddOrder, MoonTrader OrderFormVE), which never set
+        // them; the buffer only applies alongside orderAutoAdjustment, which we also leave off.
         var orderRequest = new OrderRequestData
         {
             exchangeType = conn.Profile.Exchange,

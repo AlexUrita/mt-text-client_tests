@@ -21,6 +21,13 @@ public sealed class AutoStopStore
     private readonly Dictionary<long, AutoStopOnBalanceData> _balance = new();
     private readonly Dictionary<long, AutoStopOnReportsData> _reports = new();
 
+    // MTCore 0.7.26721 moved the live per-autostop figures (balance baselines,
+    // report totals) off the config structs and onto separate *ValuesEvent
+    // pushes keyed by autostop id. Kept apart from the config dictionaries so a
+    // fresh AutoStopListEvent snapshot doesn't wipe the last known values.
+    private readonly Dictionary<long, AutoStopBalanceDynamicValueData> _balanceValues = new();
+    private readonly Dictionary<long, AutoStopReportDynamicValueData> _reportValues = new();
+
     /// <summary>True once at least one event (snapshot or incremental) landed.</summary>
     public bool HasData { get; private set; }
     public DateTime LastUpdateUtc { get; private set; }
@@ -38,6 +45,20 @@ public sealed class AutoStopStore
     public AutoStopOnBalanceData? FindBalanceById(long id)
     {
         lock (_gate) { return _balance.TryGetValue(id, out var v) ? v : null; }
+    }
+
+    /// <summary>Latest pushed balance baselines for an autostop id (0.7.26721+
+    /// AutoStopOnBalanceValuesEvent), or null if none has arrived yet.</summary>
+    public AutoStopBalanceDynamicValueData? FindBalanceValues(long id)
+    {
+        lock (_gate) { return _balanceValues.TryGetValue(id, out AutoStopBalanceDynamicValueData? v) ? v : null; }
+    }
+
+    /// <summary>Latest pushed report figures for an autostop id (0.7.26721+
+    /// AutoStopOnReportsValuesEvent), or null if none has arrived yet.</summary>
+    public AutoStopReportDynamicValueData? FindReportValues(long id)
+    {
+        lock (_gate) { return _reportValues.TryGetValue(id, out AutoStopReportDynamicValueData? v) ? v : null; }
     }
 
     /// <summary>Apply an AUTO_STOP event delivered by the subscription callback.</summary>
@@ -73,6 +94,26 @@ public sealed class AutoStopStore
                     foreach (var id in removed.AutoStopIds) { _balance.Remove(id); }
                     break;
 
+                case AutoStopOnBalanceValuesEvent balanceValues when balanceValues.Values != null:
+                    foreach (AutoStopBalanceDynamicValueData v in balanceValues.Values)
+                    {
+                        if (v != null)
+                        {
+                            _balanceValues[v.id] = v;
+                        }
+                    }
+                    break;
+
+                case AutoStopOnReportsValuesEvent reportValues when reportValues.Values != null:
+                    foreach (AutoStopReportDynamicValueData v in reportValues.Values)
+                    {
+                        if (v != null)
+                        {
+                            _reportValues[v.id] = v;
+                        }
+                    }
+                    break;
+
                 // OnReports incremental events are intentionally not handled here:
                 // every CRUD op force-refreshes the full snapshot (AutoStopListEvent),
                 // which carries the current reports list, so a transient event handler
@@ -90,6 +131,8 @@ public sealed class AutoStopStore
         {
             _balance.Clear();
             _reports.Clear();
+            _balanceValues.Clear();
+            _reportValues.Clear();
             HasData = false;
             LastUpdateUtc = default;
         }
