@@ -1402,7 +1402,7 @@ public sealed class CoreConnection : IDisposable
         {
             exchangeType = Profile.Exchange,
             marketType   = marketType,
-            asset        = symbol,
+            asset        = (symbol ?? string.Empty).ToLowerInvariant(),
             newLeverage  = leverage,
             leverageType = LeverageType.CROSS
         };

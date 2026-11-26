@@ -1239,9 +1239,10 @@ public static class ToolRegistry
 
         // Extended Order Operations
         yield return Tool("mt_orders_move_batch",
-            "Move multiple orders to new prices in a single batch.",
+            "Move multiple orders to new prices in a single batch (requires confirm=true).",
             Prop("orders_json", "string", "JSON object: {clientOrderId: newPrice, ...}", true),
             Prop("market", "string", "Market type (FUTURES/SPOT)"),
+            Prop("confirm", "boolean", "Must be true to actually move"),
             Prop("profile", "string", "Target server profile"));
         yield return Tool("mt_orders_join",
             "Join (merge) split orders back into one.",

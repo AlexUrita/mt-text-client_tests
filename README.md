@@ -1137,7 +1137,7 @@ MIT — see [LICENSE](LICENSE).
 | `mt_dust_convert` | Convert dust (small balances) to main asset. | — | — |
 | `mt_deposit_info` | Get deposit information for a coin (networks, limits). | `coin` | — |
 | `mt_deposit_address` | Get deposit address for a coin and network. | `coin`, `network` | — |
-| `mt_orders_move_batch` | Move multiple orders to new prices in a single batch. | `orders_json` | — |
+| `mt_orders_move_batch` | Move multiple orders to new prices in a single batch (requires confirm=true). | `orders_json` | — |
 | `mt_orders_join` | Join (merge) split orders back into one. | `client_order_id` | — |
 | `mt_orders_split` | Split an order into multiple smaller orders. | `client_order_id` | — |
 | `mt_fund_transfer` | Transfer funds between accounts (FUNDING <-> TRADING). | `from_account`, `asset`, `amount`, `to_account` | — |

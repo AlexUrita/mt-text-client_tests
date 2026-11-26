@@ -244,7 +244,7 @@
   "mt_dust_convert": "dust convert @<profile>",
   "mt_deposit_info": "deposit info <coin> @<profile>",
   "mt_deposit_address": "deposit address <coin> <network> @<profile>",
-  "mt_orders_move_batch": "orders move-batch <orders_json> <market> @<profile>",
+  "mt_orders_move_batch": "orders move-batch <orders_json> <market> @<profile> --confirm",
   "mt_orders_join": "orders join <client_order_id> <market> @<profile>",
   "mt_orders_split": "orders split <client_order_id> <count> <percentage> <market> @<profile>",
   "mt_fund_transfer": "orders fund-transfer <from_account> <asset> <amount> <to_account> @<profile> --confirm",

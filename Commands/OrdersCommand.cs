@@ -974,7 +974,12 @@ public sealed class OrdersCommand : ICommand
             marketType = pairInfo.MarketType;
         }
 
-        NotificationMessageData? notification = conn.ModifyLeverage(marketType, symbol, leverage);
+        // Bybit rejects a single CROSS-typed leverage request on an isolated-margin account
+        // ("Leverage CROSS isn't available"); the native client sets Bybit leverage through the
+        // buy/sell request instead, so mirror that with buy = sell = leverage.
+        NotificationMessageData? notification = conn.Profile.Exchange == ExchangeType.BYBIT
+            ? conn.ModifyLeverageBuySell(marketType, symbol, leverage, leverage)
+            : conn.ModifyLeverage(marketType, symbol, leverage);
 
         if (notification == null)
         {

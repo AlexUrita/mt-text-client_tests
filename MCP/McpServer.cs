@@ -1157,7 +1157,7 @@ public sealed class McpServer
             "mt_deposit_address" => $"deposit address {arguments["coin"]?.Value<string>() ?? ""} {arguments["network"]?.Value<string>() ?? ""}{profileSuffix}",
 
             // Extended Orders
-            "mt_orders_move_batch" => $"orders move-batch {arguments["orders_json"]?.Value<string>() ?? ""} {arguments["market"]?.Value<string>() ?? ""}{profileSuffix}",
+            "mt_orders_move_batch" => $"orders move-batch {arguments["orders_json"]?.Value<string>() ?? ""} {arguments["market"]?.Value<string>() ?? ""}{profileSuffix}{confirm}",
             "mt_orders_join" => $"orders join {arguments["client_order_id"]?.Value<string>() ?? ""} {arguments["market"]?.Value<string>() ?? ""}{profileSuffix}",
             "mt_orders_split" => $"orders split {arguments["client_order_id"]?.Value<string>() ?? ""} {arguments["count"]?.Value<string>() ?? "2"} {arguments["percentage"]?.Value<string>() ?? "50"} {arguments["market"]?.Value<string>() ?? ""}{profileSuffix}",
             "mt_fund_transfer" => $"orders fund-transfer {arguments["from_account"]?.Value<string>() ?? ""} {arguments["asset"]?.Value<string>() ?? ""} {arguments["amount"]?.Value<string>() ?? ""} {arguments["to_account"]?.Value<string>() ?? ""}{profileSuffix}{confirm}",
