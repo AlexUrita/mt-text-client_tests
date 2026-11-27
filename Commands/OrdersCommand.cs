@@ -715,6 +715,10 @@ public sealed class OrdersCommand : ICommand
                 $"  Re-run with --confirm flag.");
         }
 
+        // MTCore 0.7.26721 added OrderRequestData.maxOrderBufferType/maxOrderBuffer (serialized
+        // after orderAutoAdjustment). Left at their defaults ((byte)0 / 0f) to match the native
+        // manual-order paths (BotClient CommandAddOrder, MoonTrader OrderFormVE), which never set
+        // them; the buffer only applies alongside orderAutoAdjustment, which we also leave off.
         var orderRequest = new OrderRequestData
         {
             exchangeType = conn.Profile.Exchange,
@@ -974,7 +978,12 @@ public sealed class OrdersCommand : ICommand
             marketType = pairInfo.MarketType;
         }
 
-        NotificationMessageData? notification = conn.ModifyLeverage(marketType, symbol, leverage);
+        // Bybit rejects a single CROSS-typed leverage request on an isolated-margin account
+        // ("Leverage CROSS isn't available"); the native client sets Bybit leverage through the
+        // buy/sell request instead, so mirror that with buy = sell = leverage.
+        NotificationMessageData? notification = conn.Profile.Exchange == ExchangeType.BYBIT
+            ? conn.ModifyLeverageBuySell(marketType, symbol, leverage, leverage)
+            : conn.ModifyLeverage(marketType, symbol, leverage);
 
         if (notification == null)
         {

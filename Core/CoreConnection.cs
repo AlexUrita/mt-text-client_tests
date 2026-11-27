@@ -58,6 +58,19 @@ public sealed class CoreConnection : IDisposable
     // canonical pattern (see SendAndAwaitNotification) opens a transient
     // SendNotificationSubscribe per request with a typed handler, so the
     // long-lived dispatcher no longer needs to fan responses out by FIFO.
+    //
+    // Reconciliation fallback (re-added, but complementary — NOT the old FIFO
+    // queues): the transient per-request subscriber can still MISS an ack when
+    // the core's reply wins the cold-start / high-RTT registration race
+    // (see WarmUpTransientNotifications). Each in-flight SendAndAwaitNotification
+    // registers its typed delivery handler here under a unique token; the
+    // long-lived SubscribeNotifications dispatcher feeds these handlers too, so
+    // an ack the transient path dropped still completes the waiter. The transient
+    // subscription remains the primary path — this only catches what it misses.
+    // Same-profile dispatch is serialized, so at most one handler is live per
+    // connection; handlers self-filter by notification type and no-op once their
+    // BlockingCollection is disposed.
+    private readonly ConcurrentDictionary<object, Action<AbstractNotificationData>> _pendingNotificationWaiters = new ConcurrentDictionary<object, Action<AbstractNotificationData>>();
     private int _alertsSubscriptionId;
     private int _alertHistorySubscriptionId;
     private readonly ConcurrentDictionary<string, int> _tradeSubscriptionIds = new ConcurrentDictionary<string, int>();
@@ -66,7 +79,7 @@ public sealed class CoreConnection : IDisposable
     private readonly ConcurrentDictionary<string, int> _klineSubscriptionIds = new ConcurrentDictionary<string, int>();
     private int _tickerSubscriptionId;
     private readonly ConcurrentDictionary<string, int> _profilingSubscriptionIds = new ConcurrentDictionary<string, int>();
-    private readonly ConcurrentDictionary<string, Action<MTShared.Network.AlgorithmProfilingData>> _profilingCallbacks = new ConcurrentDictionary<string, Action<MTShared.Network.AlgorithmProfilingData>>();
+    private readonly ConcurrentDictionary<string, Action<MTShared.Network.BaseAlgorithmProfilingData>> _profilingCallbacks = new ConcurrentDictionary<string, Action<MTShared.Network.BaseAlgorithmProfilingData>>();
 
     private bool _isConnected;
     private bool _disposed;
@@ -155,7 +168,7 @@ public sealed class CoreConnection : IDisposable
     public event Action<CoreConnection>? OnCoreStatusReceived;
     public event Action<CoreConnection, int>? OnTradePairsLoaded;
     public event Action<CoreConnection>? OnAccountDataReceived;
-    public event Action<CoreConnection, string, MTShared.Network.AlgorithmProfilingData>? OnProfilingDataReceived;
+    public event Action<CoreConnection, string, MTShared.Network.BaseAlgorithmProfilingData>? OnProfilingDataReceived;
     /// <summary>
     /// Fired when MTCore restarts while the UDP connection stays alive.
     /// Detected via connectionId or serverStartTime change in ConnectionInfoData.
@@ -333,6 +346,46 @@ public sealed class CoreConnection : IDisposable
         // initial Subscribe means SendAlgorithmRequest etc. can rely on the
         // TCS queue path from the first connect onward.
         SubscribeNotifications();
+
+        // 6. Warm up the TRANSIENT notification-subscription path used by
+        // SendAndAwaitNotification. The persistent subscription above is a
+        // separate subscriber; the per-request path opens its own transient
+        // SendNotificationSubscribe and the FIRST one after a fresh connect
+        // can lose a race with a fast async accept-ack (e.g. the async
+        // STOP_ALL reply arrives in ~1 RTT, before the core has registered
+        // this client's transient subscriber), dropping that ack so the
+        // caller blocks to its timeout. Prime the transient path once here,
+        // off the connect thread, so the user's first real request is warm.
+        WarmUpTransientNotifications();
+    }
+
+    // Fire a throwaway transient notification subscription so the core
+    // registers this client's transient-subscriber routing before the first
+    // real SendAndAwaitNotification. Best-effort, off the connect thread, and
+    // released after a short window — see the cold-start race note in Subscribe().
+    private void WarmUpTransientNotifications()
+    {
+        if (_udpClient == null) { return; }
+        try
+        {
+            int warmId = _udpClient.SendNotificationSubscribe(
+                Profile.Exchange,
+                static (AbstractNotificationData _) => { /* discard — priming only */ },
+                -1);
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await System.Threading.Tasks.Task.Delay(2_000).ConfigureAwait(false);
+                    if (_udpClient != null)
+                    {
+                        _udpClient.SendNotificationUnsubscribe(ref warmId, Profile.Exchange);
+                    }
+                }
+                catch { /* best-effort release */ }
+            });
+        }
+        catch { /* best-effort warmup */ }
     }
 
     private void Unsubscribe()
@@ -543,19 +596,27 @@ public sealed class CoreConnection : IDisposable
 
         var wait = new System.Collections.Concurrent.BlockingCollection<NotificationMessageData>(boundedCapacity: 8);
         int subId = -1;
+
+        // One delivery handler, fed by BOTH the transient per-request subscription
+        // (primary) and the long-lived SubscribeNotifications dispatcher (fallback,
+        // via _pendingNotificationWaiters). Whichever path sees the typed ack first
+        // completes the wait; a second delivery is a harmless no-op (TryAdd on a
+        // full/disposed collection is caught). This closes the cold-start / high-RTT
+        // race where the core's reply beats the transient subscriber registration.
+        void Deliver(AbstractNotificationData data)
+        {
+            if (data is TNotification typed)
+            {
+                try { wait.TryAdd(build(typed)); }
+                catch { /* collection disposed in finally — drop */ }
+            }
+        }
+
+        var waiterToken = new object();
+        _pendingNotificationWaiters[waiterToken] = Deliver;
         try
         {
-            subId = _udpClient.SendNotificationSubscribe(
-                Profile.Exchange,
-                (AbstractNotificationData data) =>
-                {
-                    if (data is TNotification typed)
-                    {
-                        try { wait.TryAdd(build(typed)); }
-                        catch { /* collection disposed in finally — drop */ }
-                    }
-                },
-                -1);
+            subId = _udpClient.SendNotificationSubscribe(Profile.Exchange, Deliver, -1);
 
             send();
 
@@ -573,6 +634,10 @@ public sealed class CoreConnection : IDisposable
         }
         finally
         {
+            // Deregister the fallback handler BEFORE disposing the collection so
+            // the long-lived dispatcher can't invoke it against a disposed wait
+            // (the handler's own TryAdd/catch guards the window either way).
+            _pendingNotificationWaiters.TryRemove(waiterToken, out _);
             if (subId != -1 && _udpClient != null)
             {
                 try { _udpClient.SendNotificationUnsubscribe(ref subId, Profile.Exchange); }
@@ -598,6 +663,20 @@ public sealed class CoreConnection : IDisposable
     //
     // The data is fed back through AccountStore.ProcessData so subsequent
     // reads from the long-lived store see the snapshot.
+    // Scale the post-first-drop grace window with the OBSERVED first-drop latency so a
+    // high-RTT (remote) core gets enough time for the trailing initial-list segments,
+    // while a local core keeps the historical floor. Capped so a slow/variable core
+    // can't stall the read. Fixes place/subscription reads that needed several re-runs
+    // on a remote core: the old FIXED grace was shorter than the remote push settle
+    // (measured ~360ms local vs ~650ms remote for a UDS orders refresh).
+    private static Int32 ScaledGraceMs(Int64 firstDropMs, Int32 floorMs)
+    {
+        Int64 scaled = firstDropMs + 100;
+        if (scaled < floorMs) { scaled = floorMs; }
+        if (scaled > 1_500) { scaled = 1_500; }
+        return (Int32)scaled;
+    }
+
     private bool ReadFreshUDSData<T>(NetworkMessageType msgType, int timeoutMs = 5_000)
         where T : NetworkData
     {
@@ -608,6 +687,7 @@ public sealed class CoreConnection : IDisposable
         int subId = -1;
         try
         {
+            Int64 subscribeTick = Environment.TickCount64;
             subId = _udpClient.SendUDSSubscribe(
                 Profile.Exchange,
                 (NetworkMessageType _, NetworkData data) =>
@@ -622,11 +702,12 @@ public sealed class CoreConnection : IDisposable
                 -1,
                 NetworkMessagePriority.HIGH);
 
-            // Wait for first drop; once we have one, give a small grace
-            // window for any remaining markets to arrive.
+            // Wait for first drop; once we have one, give a grace window for any
+            // remaining markets to arrive — scaled to the observed first-drop latency
+            // so a remote (high-RTT) core gets enough time (local keeps the 250ms floor).
             if (done.Wait(timeoutMs))
             {
-                System.Threading.Thread.Sleep(250);
+                System.Threading.Thread.Sleep(ScaledGraceMs(Environment.TickCount64 - subscribeTick, 250));
             }
 
             lock (collected)
@@ -708,6 +789,7 @@ public sealed class CoreConnection : IDisposable
         int dropsReceived = 0;
         try
         {
+            Int64 subscribeTick = Environment.TickCount64;
             subId = _udpClient.SendAlgorithmsSubscribe(
                 (NetworkMessageType msgType, NetworkData data) =>
                 {
@@ -717,8 +799,9 @@ public sealed class CoreConnection : IDisposable
                 });
             if (done.Wait(timeoutMs))
             {
-                // Grace window for the rest of the snapshot to arrive.
-                System.Threading.Thread.Sleep(500);
+                // Grace window for the rest of the snapshot to arrive — scaled to the
+                // observed first-drop latency so a remote core gets enough time.
+                System.Threading.Thread.Sleep(ScaledGraceMs(Environment.TickCount64 - subscribeTick, 500));
             }
             return dropsReceived > 0;
         }
@@ -751,6 +834,7 @@ public sealed class CoreConnection : IDisposable
         int dropsReceived = 0;
         try
         {
+            Int64 subscribeTick = Environment.TickCount64;
             subId = _udpClient.SendAlgorithmTPSLsSubscribe(
                 (TPSLInfoListData data) =>
                 {
@@ -761,9 +845,10 @@ public sealed class CoreConnection : IDisposable
                 -1);
             if (done.Wait(timeoutMs))
             {
-                // Grace window for the rest of the snapshot to arrive
-                // (multi-market initial-list comes in segments on some venues).
-                System.Threading.Thread.Sleep(500);
+                // Grace window for the rest of the snapshot to arrive — scaled to the
+                // observed first-drop latency (multi-market initial-list comes in
+                // segments on some venues; a remote core needs a wider window).
+                System.Threading.Thread.Sleep(ScaledGraceMs(Environment.TickCount64 - subscribeTick, 500));
             }
             return dropsReceived > 0;
         }
@@ -846,7 +931,7 @@ public sealed class CoreConnection : IDisposable
             AlgoActionType.START => new AlgorithmRunRequestData { algorithmID = algoData.id },
             AlgoActionType.STOP => new AlgorithmStopRequestData { algorithmID = algoData.id },
             AlgoActionType.START_ALL => new AlgorithmsRunAllRequestData(),
-            AlgoActionType.STOP_ALL => new AlgorithmsStopAllRequestData(),
+            AlgoActionType.STOP_ALL => new AlgorithmsStopAllRequestData() { AsyncMode = true },
             AlgoActionType.DELETE => new AlgorithmRemoveRequestData { algorithmID = algoData.id },
             AlgoActionType.TOGGLE_DEBUG => new AlgorithmToggleDebagRequestData { algorithmID = algoData.id },
             AlgoActionType.SAVE or AlgoActionType.SAVE_START => algoData.id > 0
@@ -1317,9 +1402,13 @@ public sealed class CoreConnection : IDisposable
         {
             exchangeType = Profile.Exchange,
             marketType   = marketType,
-            asset        = symbol,
+            asset        = (symbol ?? string.Empty).ToLowerInvariant(),
             newLeverage  = leverage,
-            leverageType = LeverageType.CROSS
+            // Mirror the native client: with no leverage type selected it sends UNKNOWN.
+            // Sending CROSS made the core compare against a CROSS entry Binance doesn't
+            // have (its leverage is keyed UNKNOWN) and refuse EVERY value with
+            // "No need to change leverage for <sym>".
+            leverageType = LeverageType.UNKNOWN
         };
         return SendAndAwaitNotification<ModifyLeverageNotificationData>(
             send: () => _udpClient.SendModifyLeverageRequest(request),
@@ -1467,13 +1556,10 @@ public sealed class CoreConnection : IDisposable
 
     #region AutoStops
 
-    /// <summary>
-    /// Request autostop baseline recalculation (fire-and-forget).
-    /// </summary>
-    public void SendAutoStopsBaselineRequest()
-    {
-        _udpClient?.SendAutoStopsBaselineRequest();
-    }
+    // MTCore 0.7.26721 removed UDPClient.SendAutoStopsBaselineRequest (and the
+    // AUTOSTOP_BASELINE_UPDATE notification): balance baselines are now pushed
+    // on the AUTO_STOP subscription as AutoStopOnBalanceValuesEvent, which
+    // ForceRefreshAutoStops() feeds into AutoStopStore.
 
     /// <summary>
     /// Request autostop algorithm report data for specific algorithm IDs.
@@ -1688,10 +1774,17 @@ public sealed class CoreConnection : IDisposable
             return;
         }
 
-        // Long-lived passive subscription — only used to populate
-        // NotificationStore for the mt_notifications_list tool. Per-request
-        // wire dispatching is handled by transient subscriptions inside
-        // SendAndAwaitNotification, mirroring the vendor BotClient pattern.
+        // Long-lived subscription with two jobs:
+        //   1. Populate NotificationStore for the mt_notifications_list tool.
+        //   2. Act as the reconciliation FALLBACK for in-flight per-request
+        //      waiters. Per-request wire dispatching is still primarily handled
+        //      by the transient subscriptions inside SendAndAwaitNotification
+        //      (the vendor BotClient pattern); but that transient subscriber can
+        //      miss an ack on the cold-start / high-RTT registration race, so we
+        //      also fan each notification out to any registered pending waiter.
+        //      Handlers self-filter by type and no-op once completed/disposed, so
+        //      this is harmless when no waiter is pending or the transient path
+        //      already won.
         _notificationSubscriptionId = _udpClient.SendNotificationSubscribe(
             Profile.Exchange,
             (AbstractNotificationData data) =>
@@ -1701,6 +1794,16 @@ public sealed class CoreConnection : IDisposable
                 string profileName = data.profileName ?? Profile.Name;
                 var entry = new NotificationEntry(profileName, typeName, message, "", data.creationTime);
                 NotificationStore.Add(entry);
+
+                // Fallback dispatch to any per-request waiter the transient
+                // subscription may have missed. Runs on the receive thread;
+                // _pendingNotificationWaiters is concurrent and each handler is
+                // independently guarded.
+                foreach (var waiter in _pendingNotificationWaiters.Values)
+                {
+                    try { waiter(data); }
+                    catch { /* best-effort; a disposed waiter is a no-op */ }
+                }
             },
             _notificationSubscriptionId);
 
@@ -2088,7 +2191,9 @@ public sealed class CoreConnection : IDisposable
         {
             exchangeType = Profile.Exchange,
             marketType = marketType,
-            asset = asset,
+            // Core books are keyed lowercase (panic-sell precedent); an upper-cased asset
+            // made Bybit reject the request with "Illegal category".
+            asset = (asset ?? string.Empty).ToLowerInvariant(),
             buyLeverage = buyLeverage,
             sellLeverage = sellLeverage
         };
@@ -2156,7 +2261,7 @@ public sealed class CoreConnection : IDisposable
         symbol = (symbol ?? string.Empty).ToLowerInvariant();
         string key = $"{marketType}:{symbol}:{algorithmId}";
         // Strong ref to the callback so the SDK's WeakDelegate isn't GC'd.
-        Action<MTShared.Network.AlgorithmProfilingData> cb = data => OnProfilingDataReceived?.Invoke(this, symbol, data);
+        Action<MTShared.Network.BaseAlgorithmProfilingData> cb = data => OnProfilingDataReceived?.Invoke(this, symbol, data);
         _profilingCallbacks[key] = cb;
         int existing = _profilingSubscriptionIds.TryGetValue(key, out int prev) ? prev : -1;
         int newId = _udpClient.SendAlgorithmProfilingDataSubscribe(

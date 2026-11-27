@@ -1034,7 +1034,7 @@ MIT — see [LICENSE](LICENSE).
 | `mt_monitor_performance` | Get time-series performance snapshots. Each snapshot includes CPU, memory, threads, latency, UDS status. Start monitor first for history. | — | — |
 | `mt_monitor_stats` | Aggregate statistics over the monitoring window: min/max/avg for CPU, memory, threads, latency. Shows trends and sample count. | — | — |
 | `mt_autostops_list` | List balance and report auto-stops with status. Pulls a fresh AUTO_STOP subscription snapshot from Core (MTCore 0.7.24554+). The list index of each balance auto-stop is the value to pass to edit/start/stop/delete. | — | — |
-| `mt_autostops_baseline` | Request auto-stop baseline recalculation on Core (fire-and-forget). | — | — |
+| `mt_autostops_baseline` | Show the core-pushed balance auto-stop baselines (MTCore 0.7.26721 removed the explicit recalculation request; baselines arrive as AutoStopOnBalanceValuesEvent on the AUTO_STOP subscription). | — | — |
 | `mt_autostops_reports` | Get report data for auto-stop algorithms. Optionally filter by algorithm IDs. | — | — |
 | `mt_autostops_add` | Create a new balance auto-stop (AutoStopOnBalanceData). Created disabled — call mt_autostops_start to activate. Sends AUTO_STOP_REQUEST(AddRequest) to Core. | `max_loss`, `confirm` | ✓ |
 | `mt_autostops_edit` | Mutate an existing balance auto-stop by its mt_autostops_list index. Only the fields you pass are updated. Sends AUTO_STOP_REQUEST(UpdateRequest). | `index`, `confirm` | ✓ |
@@ -1137,7 +1137,7 @@ MIT — see [LICENSE](LICENSE).
 | `mt_dust_convert` | Convert dust (small balances) to main asset. | — | — |
 | `mt_deposit_info` | Get deposit information for a coin (networks, limits). | `coin` | — |
 | `mt_deposit_address` | Get deposit address for a coin and network. | `coin`, `network` | — |
-| `mt_orders_move_batch` | Move multiple orders to new prices in a single batch. | `orders_json` | — |
+| `mt_orders_move_batch` | Move multiple orders to new prices in a single batch (requires confirm=true). | `orders_json` | — |
 | `mt_orders_join` | Join (merge) split orders back into one. | `client_order_id` | — |
 | `mt_orders_split` | Split an order into multiple smaller orders. | `client_order_id` | — |
 | `mt_fund_transfer` | Transfer funds between accounts (FUNDING <-> TRADING). | `from_account`, `asset`, `amount`, `to_account` | — |

@@ -20,7 +20,7 @@ namespace MTTextClient.Commands;
 ///
 /// Subcommands:
 ///   autostops list              — list balance + report auto-stops with status
-///   autostops baseline          — request auto-stop baseline recalculation
+///   autostops baseline          — show core-pushed balance baselines (0.7.26721+)
 ///   autostops reports [ids]     — get report data for specific auto-stop IDs
 ///   autostops add ...           — create a new balance auto-stop (disabled)
 ///   autostops edit &lt;idx&gt; ...    — mutate a balance auto-stop by list index
@@ -50,7 +50,7 @@ public sealed class AutoStopsCommand : ICommand
             return CommandResult.Fail(
                 "Usage: autostops <subcommand>\n" +
                 "  list       — list balance + report auto-stops with status\n" +
-                "  baseline   — request baseline recalculation\n" +
+                "  baseline   — show core-pushed balance baselines\n" +
                 "  reports    — get report data for auto-stop IDs\n" +
                 "  add        — create a new balance auto-stop\n" +
                 "  edit       — mutate a balance auto-stop by list index\n" +
@@ -133,11 +133,13 @@ public sealed class AutoStopsCommand : ICommand
         for (int i = 0; i < balance.Count; i++)
         {
             AutoStopOnBalanceData a = balance[i];
+            AutoStopBalanceDynamicValueData? values = conn.AutoStopStore.FindBalanceValues(a.id);
             string en = a.isRunning ? "RUNNING" : "stopped";
             sb.AppendLine($"  [{i}] {en}  id={a.id} name=\"{a.name ?? ""}\" market={MarketName((int)a.marketType)} " +
-                $"maxLoss={a.maxLoss} asset=\"{a.asset ?? ""}\" keywords=\"{a.keywords ?? ""}\"" +
-                $"{(a.excludeKeywords ? " (excl)" : "")} panicSell={a.panicSellIfTriggered} " +
-                $"algos={a.algorithmCount} baseLine={a.baseLine} balance={a.currentBalance}");
+                $"maxLoss={ThresholdText(a.maxLossThreshold)} targetProfit={ThresholdText(a.targetProfitThreshold)} " +
+                $"asset=\"{a.quoteAsset ?? ""}\" actions={ActionsText(a.stopEnabled, a.pauseEnabled, a.pauseDuration, a.panicSellEnabled)} " +
+                $"keywords=\"{a.stopKeywords ?? ""}\"{(a.excludeStopKeywords ? " (excl)" : "")} " +
+                $"baseLine={(values != null ? values.lossBaseLine.ToString(CultureInfo.InvariantCulture) : "n/a")}");
         }
         sb.AppendLine();
         sb.AppendLine($"Report auto-stops ({reports.Count}):");
@@ -145,40 +147,61 @@ public sealed class AutoStopsCommand : ICommand
         {
             AutoStopOnReportsData r = reports[i];
             sb.AppendLine($"  [{i}] {(r.isRunning ? "RUNNING" : "stopped")} id={r.id} name=\"{r.name ?? ""}\" " +
-                $"maxLoss={r.maxLoss} tf={r.timeFrame} symbols=\"{r.symbols ?? ""}\"");
+                $"maxLoss={ThresholdText(r.maxLossThreshold)} tf={r.lookbackPeriod} symbols=\"{r.symbols ?? ""}\"");
         }
 
+        // MTCore 0.7.26721 restructured AutoStopOnBalanceData: maxLoss → maxLossThreshold
+        // (toggle+value), asset → quoteAsset, keywords → stopKeywords, panicSellIfTriggered →
+        // panicSellEnabled, and the live figures (baseLine) moved to AutoStopOnBalanceValuesEvent.
+        // The legacy JSON keys are kept (derived from the new fields) so existing consumers keep
+        // working; algorithmCount/currentBalance no longer exist on the wire and are dropped.
         return CommandResult.Ok(sb.ToString(),
             new
             {
                 Server = conn.Name,
                 BalanceCount = balance.Count,
-                Balance = balance.Select((a, i) => new
+                Balance = balance.Select((a, i) =>
                 {
-                    Index = i,
-                    a.id,
-                    a.name,
-                    MarketType = MarketName((int)a.marketType),
-                    a.maxLoss,
-                    a.asset,
-                    a.keywords,
-                    a.excludeKeywords,
-                    a.panicSellIfTriggered,
-                    a.isRunning,
-                    a.algorithmCount,
-                    a.baseLine,
-                    a.currentBalance,
+                    AutoStopBalanceDynamicValueData? values = conn.AutoStopStore.FindBalanceValues(a.id);
+                    return new
+                    {
+                        Index = i,
+                        a.id,
+                        a.name,
+                        MarketType = MarketName((int)a.marketType),
+                        maxLoss = a.maxLossThreshold.toggle ? (double?)a.maxLossThreshold.value : null,
+                        MaxLossEnabled = a.maxLossThreshold.toggle,
+                        TargetProfit = a.targetProfitThreshold.toggle ? (double?)a.targetProfitThreshold.value : null,
+                        asset = a.quoteAsset,
+                        keywords = a.stopKeywords,
+                        excludeKeywords = a.excludeStopKeywords,
+                        panicSellIfTriggered = a.panicSellEnabled,
+                        a.stopEnabled,
+                        a.pauseEnabled,
+                        a.pauseKeywords,
+                        a.excludePauseKeywords,
+                        a.pauseDuration,
+                        a.isRunning,
+                        baseLine = values?.lossBaseLine,
+                        ProfitBaseLine = values?.profitBaseLine,
+                    };
                 }).ToList(),
                 ReportCount = reports.Count,
-                Reports = reports.Select((r, i) => new
+                Reports = reports.Select((r, i) =>
                 {
-                    Index = i,
-                    r.id,
-                    r.name,
-                    r.maxLoss,
-                    TimeFrame = r.timeFrame.ToString(),
-                    r.symbols,
-                    r.isRunning,
+                    AutoStopReportDynamicValueData? values = conn.AutoStopStore.FindReportValues(r.id);
+                    return new
+                    {
+                        Index = i,
+                        r.id,
+                        r.name,
+                        maxLoss = r.maxLossThreshold.toggle ? (double?)r.maxLossThreshold.value : null,
+                        TimeFrame = r.lookbackPeriod.ToString(),
+                        r.symbols,
+                        r.isRunning,
+                        ReportTotal = values?.reportTotal,
+                        OrderCount = values?.orderCount,
+                    };
                 }).ToList(),
             });
     }
@@ -187,8 +210,72 @@ public sealed class AutoStopsCommand : ICommand
     {
         CoreConnection? conn = ResolveConnection(targetProfile, out CommandResult? error);
         if (conn == null) return error!;
-        conn.SendAutoStopsBaselineRequest();
-        return CommandResult.Ok($"[{conn.Name}] AutoStops baseline recalculation requested.");
+
+        // MTCore 0.7.26721 removed the explicit baseline-recalculation request
+        // (UDPClient.SendAutoStopsBaselineRequest + AUTOSTOP_BASELINE_UPDATE). The core
+        // now pushes baselines itself as AutoStopOnBalanceValuesEvent on the AUTO_STOP
+        // subscription, so this reports the latest pushed baselines instead.
+        conn.ForceRefreshAutoStops();
+        IReadOnlyList<AutoStopOnBalanceData> balance = conn.AutoStopStore.Balance;
+        var sb = new StringBuilder();
+        sb.AppendLine($"[{conn.Name}] AutoStops baselines (core-pushed; explicit recalculation request removed in MTCore 0.7.26721):");
+        for (int i = 0; i < balance.Count; i++)
+        {
+            AutoStopBalanceDynamicValueData? values = conn.AutoStopStore.FindBalanceValues(balance[i].id);
+            sb.AppendLine(values != null
+                ? $"  [{i}] id={balance[i].id} lossBaseLine={values.lossBaseLine.ToString(CultureInfo.InvariantCulture)} profitBaseLine={values.profitBaseLine.ToString(CultureInfo.InvariantCulture)}"
+                : $"  [{i}] id={balance[i].id} (no baseline pushed yet)");
+        }
+        return CommandResult.Ok(sb.ToString(),
+            new
+            {
+                Server = conn.Name,
+                Baselines = balance.Select((a, i) =>
+                {
+                    AutoStopBalanceDynamicValueData? values = conn.AutoStopStore.FindBalanceValues(a.id);
+                    return new
+                    {
+                        Index = i,
+                        a.id,
+                        LossBaseLine = values?.lossBaseLine,
+                        ProfitBaseLine = values?.profitBaseLine,
+                    };
+                }).ToList(),
+            });
+    }
+
+    private static string ThresholdText(ToggleDoubleValueData threshold)
+    {
+        if (!threshold.toggle)
+        {
+            return "off";
+        }
+        return threshold.value.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static string ActionsText(bool stop, bool pause, Int32 pauseDurationMs, bool panicSell)
+    {
+        var parts = new List<string>();
+        if (stop)
+        {
+            parts.Add("stop");
+        }
+        if (pause)
+        {
+            parts.Add($"pause({pauseDurationMs}ms)");
+        }
+        if (panicSell)
+        {
+            parts.Add("panicSell");
+        }
+        return parts.Count == 0 ? "none" : string.Join("+", parts);
+    }
+
+    /// <summary>Build the 0.7.26721 max-loss threshold the way the native BotClient
+    /// does: enabled, value stored as a negative loss (-|x|).</summary>
+    public static ToggleDoubleValueData LossThreshold(double maxLoss)
+    {
+        return new ToggleDoubleValueData(true, -Math.Abs(maxLoss));
     }
 
     private CommandResult HandleReports(List<string> cleanArgs, string? targetProfile)
@@ -246,16 +333,24 @@ public sealed class AutoStopsCommand : ICommand
             return CommandResult.Fail("autostops add --max-loss <value> is required (e.g. -0.1 or 5.0).");
         }
 
+        // MTCore 0.7.26721 schema: the loss trigger is a toggle+value threshold and the
+        // triggered actions are explicit flags. Mirrors the native BotClient
+        // (CommandAddAutoStopOnBalance): maxLossThreshold = {toggle=true, value=-|x|},
+        // stopEnabled=true for the STOP action (the pre-26721 implicit behaviour),
+        // panicSellEnabled for the PANIC_SELL action.
         var autostop = new AutoStopOnBalanceData
         {
             id = 0, // core assigns the id on add
             name = flags.GetValueOrDefault("--name") ?? "",
             marketType = (MarketType)ResolveMarket(flags.GetValueOrDefault("--market") ?? "FUTURES"),
-            asset = flags.GetValueOrDefault("--asset") ?? "usdt",
-            keywords = flags.GetValueOrDefault("--keywords") ?? "",
-            excludeKeywords = flags.ContainsKey("--exclude-keywords"),
-            maxLoss = maxLoss,
-            panicSellIfTriggered = flags.ContainsKey("--panic-sell"),
+            quoteAsset = flags.GetValueOrDefault("--asset") ?? "usdt",
+            maxLossThreshold = LossThreshold(maxLoss),
+            stopEnabled = true,
+            stopKeywords = flags.GetValueOrDefault("--keywords") ?? "",
+            excludeStopKeywords = flags.ContainsKey("--exclude-keywords"),
+            pauseKeywords = "",
+            panicSellEnabled = flags.ContainsKey("--panic-sell"),
+            panicSellWhitelistSymbols = "",
             isRunning = false,
         };
 
@@ -284,15 +379,15 @@ public sealed class AutoStopsCommand : ICommand
 
         var flags = ParseFlags(args.GetRange(1, args.Count - 1));
         if (flags.TryGetValue("--max-loss", out string? mls) && double.TryParse(mls, NumberStyles.Any, CultureInfo.InvariantCulture, out double ml))
-            a.maxLoss = ml;
+            a.maxLossThreshold = LossThreshold(ml);
         if (flags.TryGetValue("--name", out string? name)) a.name = name;
         if (flags.TryGetValue("--market", out string? mk)) a.marketType = (MarketType)ResolveMarket(mk);
-        if (flags.TryGetValue("--asset", out string? asset)) a.asset = asset;
-        if (flags.TryGetValue("--keywords", out string? kw)) a.keywords = kw;
-        if (flags.ContainsKey("--exclude-keywords")) a.excludeKeywords = true;
-        if (flags.ContainsKey("--include-keywords")) a.excludeKeywords = false;
-        if (flags.ContainsKey("--panic-sell")) a.panicSellIfTriggered = true;
-        if (flags.ContainsKey("--no-panic-sell")) a.panicSellIfTriggered = false;
+        if (flags.TryGetValue("--asset", out string? asset)) a.quoteAsset = asset;
+        if (flags.TryGetValue("--keywords", out string? kw)) a.stopKeywords = kw;
+        if (flags.ContainsKey("--exclude-keywords")) a.excludeStopKeywords = true;
+        if (flags.ContainsKey("--include-keywords")) a.excludeStopKeywords = false;
+        if (flags.ContainsKey("--panic-sell")) a.panicSellEnabled = true;
+        if (flags.ContainsKey("--no-panic-sell")) a.panicSellEnabled = false;
         if (flags.TryGetValue("--enabled", out string? en))
             a.isRunning = en.Equals("true", StringComparison.OrdinalIgnoreCase) || en == "1";
 
