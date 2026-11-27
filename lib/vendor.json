@@ -10,7 +10,7 @@
       "files": {
         "MTShared.dll": {
           "path": "MoonTrader.app/Contents/Resources/Data/Managed/MTShared.dll",
-          "sha256": "521eece8911b5e8a4cf33b3d258a05927eb8aef6585fdfdd1a56fdd0bd5e8051"
+          "sha256": "2181cb6117de541973d37f12e080c0bce5a60729d7f18bf8bad04d48b7cd93bf"
         },
         "LiteNetLib.dll": {
           "path": "lib/LiteNetLib.dll",
@@ -26,7 +26,7 @@
       "files": {
         "MTShared.dll": {
           "path": "MoonTrader.app/Contents/Resources/Data/Managed/MTShared.dll",
-          "sha256": "851bca2f6556b577c925329670afdaaa5dd2bf4990a3bed8bfdf25a8e05a4792"
+          "sha256": "7cd9f17473a764a58770d87436ab9b3a4ea71906cb42fb9fa45ee373b80b2b24"
         },
         "LiteNetLib.dll": {
           "path": "lib/LiteNetLib.dll",
@@ -42,7 +42,7 @@
       "files": {
         "MTShared.dll": {
           "path": "BotClient/lib/MTShared.dll",
-          "sha256": "9cf76f450916aada885ae78e08cab95b5faac966d34c6e209bb443dca56bc23d"
+          "sha256": "7cd9f17473a764a58770d87436ab9b3a4ea71906cb42fb9fa45ee373b80b2b24"
         },
         "LiteNetLib.dll": {
           "path": "lib/LiteNetLib.dll",
@@ -58,7 +58,7 @@
       "files": {
         "MTShared.dll": {
           "path": "BotClient/lib/MTShared.dll",
-          "sha256": "e0bdda23c3db110e9122609f2ca1274acbaefd8834b1e2f99d155d4ca5f0a549"
+          "sha256": "2181cb6117de541973d37f12e080c0bce5a60729d7f18bf8bad04d48b7cd93bf"
         },
         "LiteNetLib.dll": {
           "path": "lib/LiteNetLib.dll",
