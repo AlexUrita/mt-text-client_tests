@@ -990,10 +990,54 @@ public sealed class OrdersCommand : ICommand
             return CommandResult.Ok($"[{conn.Name}] Set leverage {symbol} {leverage}x: sent (timed out).");
         }
 
+        // Bybit refuses a request for the leverage it already has ("leverage not modified", or
+        // "Illegal category" from some core builds). Always send — the cached leverage can lag —
+        // and turn only that refusal into a no-op success. Binance's "No need to change leverage"
+        // is NOT treated this way: live tests showed the core return it for a value that differed
+        // from the real one, so accepting it would hide real failures.
+        if (!notification.IsOk && IsAlreadyAtLeverage(conn, symbol, marketType, leverage, notification.msgString))
+        {
+            return AlreadyAtLeverage(conn, symbol, leverage);
+        }
+
         return notification.IsOk
             ? CommandResult.Ok($"[{conn.Name}] {symbol} leverage set to {leverage}x ✓",
                 new { Server = conn.Name, Symbol = symbol, Leverage = leverage, Action = "SET_LEVERAGE" })
             : CommandResult.Fail($"[{conn.Name}] Set leverage FAILED — {notification.notificationCode}: {notification}");
+    }
+
+    internal const string BYBIT_LEVERAGE_NOT_MODIFIED = "leverage not modified";
+    internal const string BYBIT_ILLEGAL_CATEGORY = "Illegal category";
+
+    private static bool IsAlreadyAtLeverage(
+        CoreConnection conn, string symbol, MarketType marketType, short leverage, string? message)
+    {
+        if (conn.Profile.Exchange != ExchangeType.BYBIT || string.IsNullOrEmpty(message))
+        {
+            return false;
+        }
+
+        if (message.Contains(BYBIT_LEVERAGE_NOT_MODIFIED, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // "Illegal category" is ambiguous on its own; require the cached CROSS leverage
+        // (accurate on Bybit) to already equal the target.
+        if (message.Contains(BYBIT_ILLEGAL_CATEGORY, StringComparison.OrdinalIgnoreCase) &&
+            conn.ForceRefreshLeverageInfo(timeoutMs: 2_000))
+        {
+            LeverageInfoSnapshot info = conn.ExchangeInfoStore.GetLeverageInfo(symbol, marketType);
+            return info.Leverages.TryGetValue(LeverageType.CROSS, out int cross) && cross == leverage;
+        }
+
+        return false;
+    }
+
+    private static CommandResult AlreadyAtLeverage(CoreConnection conn, string symbol, short leverage)
+    {
+        return CommandResult.Ok($"[{conn.Name}] {symbol} leverage set to {leverage}x ✓ (already {leverage}x, exchange reported no change)",
+            new { Server = conn.Name, Symbol = symbol, Leverage = leverage, Action = "SET_LEVERAGE", AlreadySet = true });
     }
 
     private CommandResult SetMarginType(string[] args, string? targetProfile, bool confirmed)
