@@ -1404,7 +1404,11 @@ public sealed class CoreConnection : IDisposable
             marketType   = marketType,
             asset        = (symbol ?? string.Empty).ToLowerInvariant(),
             newLeverage  = leverage,
-            leverageType = LeverageType.CROSS
+            // Mirror the native client: with no leverage type selected it sends UNKNOWN.
+            // Sending CROSS made the core compare against a CROSS entry Binance doesn't
+            // have (its leverage is keyed UNKNOWN) and refuse EVERY value with
+            // "No need to change leverage for <sym>".
+            leverageType = LeverageType.UNKNOWN
         };
         return SendAndAwaitNotification<ModifyLeverageNotificationData>(
             send: () => _udpClient.SendModifyLeverageRequest(request),
@@ -2187,7 +2191,9 @@ public sealed class CoreConnection : IDisposable
         {
             exchangeType = Profile.Exchange,
             marketType = marketType,
-            asset = asset,
+            // Core books are keyed lowercase (panic-sell precedent); an upper-cased asset
+            // made Bybit reject the request with "Illegal category".
+            asset = (asset ?? string.Empty).ToLowerInvariant(),
             buyLeverage = buyLeverage,
             sellLeverage = sellLeverage
         };
