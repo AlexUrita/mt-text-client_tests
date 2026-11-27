@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Threading;
-using System.Threading.Tasks;
 using FluentAssertions;
 using MTTextClient.Core;
 using Xunit;
@@ -50,16 +49,23 @@ public sealed class LiveMarketStoreWaitUnitTests
 
     [Fact]
     [Trait("Category", "Unit")]
-    public async Task WaitForKey_unblocks_promptly_when_an_update_arrives()
+    public void WaitForKey_unblocks_promptly_when_an_update_arrives()
     {
         var store = new LiveMarketStore();
         const string key = "ethusdt:FUTURES";
 
+        // A dedicated thread, not Task.Run: the shared CI runners starve the
+        // thread pool under xUnit parallelism, so a pooled waiter can take
+        // seconds to even start — which the timing budget below would then
+        // misread as a missed signal. An OS thread is scheduled promptly.
+        bool got = false;
+        var waiter = new Thread(() => got = store.WaitForKey(key, 5000)) { IsBackground = true };
+
         var sw = Stopwatch.StartNew();
-        Task<bool> waiter = Task.Run(() => store.WaitForKey(key, 5000));
+        waiter.Start();
         Thread.Sleep(100); // let the waiter register before the push
         store.Update(key, Entry("ethusdt"));
-        bool got = await waiter;
+        waiter.Join();
         sw.Stop();
 
         got.Should().BeTrue();
@@ -68,20 +74,24 @@ public sealed class LiveMarketStoreWaitUnitTests
 
     [Fact]
     [Trait("Category", "Unit")]
-    public async Task WaitForKey_never_misses_an_update_that_races_registration()
+    public void WaitForKey_never_misses_an_update_that_races_registration()
     {
         // Fire Update concurrently with WaitForKey so the push can land in the
         // narrow window between the fast-path check and waiter registration. Every
         // iteration must observe it (true) AND return promptly — a missed wakeup
         // would block the full 2s timeout, so the total-time budget catches it.
+        // Dedicated threads (not Task.Run) keep the race real on CI: a starved
+        // thread pool would otherwise delay the pusher past the 2s wait and
+        // manufacture a false "missed update" that isn't a real race loss.
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < 200; i++)
         {
             var store = new LiveMarketStore();
             string key = $"sym{i}:FUTURES";
-            Task pusher = Task.Run(() => store.Update(key, Entry($"sym{i}")));
+            var pusher = new Thread(() => store.Update(key, Entry($"sym{i}"))) { IsBackground = true };
+            pusher.Start();
             bool got = store.WaitForKey(key, 2000);
-            await pusher;
+            pusher.Join();
             got.Should().BeTrue($"iteration {i} must observe the racing update");
         }
         sw.Stop();
